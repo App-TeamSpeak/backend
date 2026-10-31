@@ -1,0 +1,177 @@
+name: Backend CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_VERSION: '24.x'
+
+jobs:
+  commitlint:
+    name: Conventional Commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Instalar herramientas
+        run: npm ci --ignore-scripts
+      - name: Validar commits y título del PR
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          npm run commitlint -- --from "$PR_BASE" --to "$PR_HEAD"
+          printf '%s\n' "$PR_TITLE" | npm run commitlint -- --config commitlint.config.cjs
+      - name: Registrar alcance fuera de PR
+        if: github.event_name != 'pull_request'
+        run: echo 'La validación del historial se ejecuta sobre los PR; no se revalida main completo.' >> "$GITHUB_STEP_SUMMARY"
+
+  node-services:
+    name: Validar ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: API
+            path: backend-api
+            artifact: api
+          - service: Realtime
+            path: backend-realtime
+            artifact: realtime
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.path }}/package-lock.json
+      - name: Verificar estructura del servicio
+        working-directory: ${{ matrix.path }}
+        run: |
+          test -f Dockerfile
+          test -f package.json
+          test -f package-lock.json
+      - name: Instalar dependencias
+        working-directory: ${{ matrix.path }}
+        run: npm ci
+      - name: Lint
+        working-directory: ${{ matrix.path }}
+        run: npm run lint --if-present
+      - name: Typecheck
+        working-directory: ${{ matrix.path }}
+        run: npm run typecheck --if-present
+      - name: Pruebas con cobertura
+        working-directory: ${{ matrix.path }}
+        run: npm run test:coverage
+      - name: Publicar reporte LCOV
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.artifact }}
+          path: ${{ matrix.path }}/coverage
+          if-no-files-found: error
+          retention-days: 14
+      - name: Compilación
+        working-directory: ${{ matrix.path }}
+        run: npm run build
+
+  docker:
+    name: Construir imagen ${{ matrix.service }}
+    needs: [commitlint, node-services]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: API
+            path: backend-api
+          - service: Realtime
+            path: backend-realtime
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+      - name: Construir sin publicar
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.path }}
+          file: ${{ matrix.path }}/Dockerfile
+          push: false
+          tags: teamspeak-${{ matrix.path }}:${{ github.sha }}
+
+  sonar:
+    name: SonarQube Cloud
+    needs: [commitlint, node-services, docker]
+    if: vars.SONAR_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+      SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+      SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Descargar cobertura API
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-api
+          path: backend-api/coverage
+      - name: Descargar cobertura realtime
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-realtime
+          path: backend-realtime/coverage
+      - name: Verificar reportes de cobertura
+        run: |
+          test -s backend-api/coverage/lcov.info
+          test -s backend-realtime/coverage/lcov.info
+          echo 'Los reportes LCOV de ambos servicios están listos para SonarQube Cloud.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Validar configuración Sonar
+        run: |
+          for name in SONAR_TOKEN SONAR_PROJECT_KEY SONAR_ORGANIZATION; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Falta configurar $name para activar SonarQube Cloud."
+              exit 1
+            fi
+          done
+          {
+            printf 'sonar.projectKey=%s\n' "$SONAR_PROJECT_KEY"
+            printf 'sonar.organization=%s\n' "$SONAR_ORGANIZATION"
+          } >> sonar-project.properties
+      - name: Ejecutar análisis
+        uses: SonarSource/sonarqube-scan-action@v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}

@@ -1,0 +1,14 @@
+{
+  "name": "teamspeak-backend-tooling",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "commitlint": "commitlint --verbose"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "21.2.3",
+    "@commitlint/config-conventional": "21.2.3"
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+coverage/
+# Variables de entorno locales: nunca se suben al repositorio.
+**/.env
+**/.env.*
+# Las plantillas sin secretos sí se pueden versionar.
+!**/.env.example
+.DS_Store
+.idea/
+.vscode/

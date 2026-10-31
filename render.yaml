@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: teamspeak-backend-api
+    runtime: docker
+    plan: free
+    branch: main
+    dockerfilePath: ./backend-api/Dockerfile
+    dockerContext: ./backend-api
+    autoDeployTrigger: checksPass
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+
+  - type: web
+    name: teamspeak-backend-realtime
+    runtime: docker
+    plan: free
+    branch: main
+    dockerfilePath: ./backend-realtime/Dockerfile
+    dockerContext: ./backend-realtime
+    autoDeployTrigger: checksPass
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: TURN_SERVER_URL
+        sync: false
+      - key: TURN_SERVER_USERNAME
+        sync: false
+      - key: TURN_SERVER_CREDENTIAL
+        sync: false
