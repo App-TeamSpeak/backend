@@ -174,6 +174,17 @@ También puedes ejecutar todo el diagnóstico de un servicio con:
 npm run validate
 ```
 
+Para comprobar la conexión real con Firestore sin crear ni eliminar datos, configura
+las variables Firebase en `backend-api/.env` y ejecuta desde la raíz del backend:
+
+```bash
+make firestore-smoke
+```
+
+La prueba lista las colecciones existentes y falla si las credenciales, el proyecto
+o los permisos de Firestore no están configurados correctamente. No ejecutes esta
+prueba con credenciales dentro del repositorio.
+
 El análisis de SonarCloud espera el resultado del Quality Gate y falla el workflow
 cuando no se cumple. La política recomendada para configurar en SonarCloud está en
 `docs/sonar-quality-policy.md`.

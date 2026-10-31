@@ -1,7 +1,7 @@
 API_IMAGE ?= teamspeak-backend-api:local
 REALTIME_IMAGE ?= teamspeak-backend-realtime:local
 
-.PHONY: install validate validate-api validate-realtime test docker-build docker-build-api docker-build-realtime up down restart logs ps clean
+.PHONY: install validate validate-api validate-realtime test firestore-smoke docker-build docker-build-api docker-build-realtime up down restart logs ps clean
 
 install:
 	npm --prefix backend-api ci
@@ -18,6 +18,9 @@ validate-realtime:
 test:
 	npm --prefix backend-api run test:coverage
 	npm --prefix backend-realtime run test:coverage
+
+firestore-smoke:
+	npm --prefix backend-api run test:firestore
 
 docker-build: docker-build-api docker-build-realtime
 
