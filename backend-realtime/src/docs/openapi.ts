@@ -6,6 +6,12 @@ export const openapi = {
     description: 'Health check HTTP del gateway y referencia de eventos Socket.IO/WebRTC.',
   },
   paths: {
+    '/': {
+      get: {
+        summary: 'Comprueba que el gateway responde en la ruta raíz',
+        responses: { 200: { description: 'Servicio disponible' } },
+      },
+    },
     '/health': {
       get: {
         summary: 'Comprueba que el gateway responde',

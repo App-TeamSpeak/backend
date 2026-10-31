@@ -49,6 +49,13 @@ export const openapi = {
     },
   },
   paths: {
+    '/': {
+      get: {
+        tags: ['Health'],
+        summary: 'Comprueba que la API responde en la ruta raíz',
+        responses: { 200: { description: 'Servicio disponible' } },
+      },
+    },
     '/health': {
       get: {
         tags: ['Health'],

@@ -3,6 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { app } from './app';
 
 describe('TeamSpeak API base', () => {
+  it('responde con el health check en la ruta raíz', async () => {
+    const response = await request(app).get('/');
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ success: true, status: 'ok' });
+  });
+
   it('responde al health check', async () => {
     const response = await request(app).get('/health');
     expect(response.status).toBe(200);
