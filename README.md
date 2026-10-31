@@ -125,6 +125,20 @@ docker logs -f teamspeak-backend-api-local
 docker logs -f teamspeak-backend-realtime-local
 ```
 
+También puedes usar los comandos automatizados del repositorio:
+
+```bash
+make docker-build
+make up
+make ps
+make logs
+make down
+```
+
+`make up` construye y levanta API y Realtime con `docker-compose.yml`. La API
+queda disponible en `http://localhost:10000` y Realtime en
+`http://localhost:10001`.
+
 Para detenerlos y eliminarlos cuando ya no se necesiten:
 
 ```bash
