@@ -7,6 +7,17 @@ Backend del salón de estudio colaborativo en tiempo real.
 - `backend-api`: API REST, autenticación Firebase, Firestore y Swagger.
 - `backend-realtime`: Socket.IO, presencia, chat en tiempo real y señalización WebRTC.
 
+## Servicios desplegados
+
+- [API REST](https://teamspeak-backend-api.onrender.com)
+- [Health API](https://teamspeak-backend-api.onrender.com/health)
+- [Swagger API](https://teamspeak-backend-api.onrender.com/api/docs)
+- [OpenAPI API](https://teamspeak-backend-api.onrender.com/api/openapi.json)
+- [Servidor realtime](https://teamspeak-backend-realtime.onrender.com)
+- [Health realtime](https://teamspeak-backend-realtime.onrender.com/health)
+- [Swagger realtime](https://teamspeak-backend-realtime.onrender.com/api/docs)
+- [OpenAPI realtime](https://teamspeak-backend-realtime.onrender.com/api/openapi.json)
+
 ## Arquitectura sencilla
 
 Cada servicio mantiene la misma separación por responsabilidades:
