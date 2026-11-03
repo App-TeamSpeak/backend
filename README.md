@@ -195,7 +195,6 @@ La evidencia de Sprint 0 se consulta mediante `GET /api/sprint0/demo`, que lee e
 documento `sprint_prueba/verificacion_sprint0` y devuelve sus campos reales dentro
 de `data`. Esta ruta es pública para facilitar la verificación del despliegue;
 responde `404` si el documento no existe y `503` si Firestore no está disponible.
-
 Para desplegar las reglas que bloquean el acceso directo desde clientes Firebase,
 usa Firebase CLI desde la carpeta `backend`:
 

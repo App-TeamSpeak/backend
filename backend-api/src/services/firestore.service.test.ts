@@ -75,7 +75,6 @@ describe('Firestore service', () => {
     expect(getFirestoreDb).toHaveBeenCalledTimes(1);
     expect(get).toHaveBeenCalledTimes(1);
   });
-
   it('reads the Sprint 0 verification document and preserves its fields', async () => {
     const data = { estado: 'ok', evidencia: 'real' };
     const get = vi.fn().mockResolvedValue({ exists: true, data: () => data });

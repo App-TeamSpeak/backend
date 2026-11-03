@@ -22,7 +22,6 @@ export async function checkFirestoreConnection(firestore: Firestore = getFiresto
   // La consulta solo comprueba conectividad y permisos; nunca devuelve documentos privados.
   await firestore.collection('users').select(FieldPath.documentId()).limit(1).get();
 }
-
 export async function getSprint0DemoDocument(
   firestore: Firestore = getFirestoreDb(),
 ): Promise<Record<string, unknown> | null> {
