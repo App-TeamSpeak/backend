@@ -11,6 +11,8 @@ Backend del salón de estudio colaborativo en tiempo real.
 
 - [API REST](https://teamspeak-backend-api.onrender.com)
 - [Health API](https://teamspeak-backend-api.onrender.com/health)
+- [Demo Sprint 0](https://teamspeak-backend-api.onrender.com/api/sprint0/demo)
+- [Health Firestore](https://teamspeak-backend-api.onrender.com/health/firestore)
 - [Swagger API](https://teamspeak-backend-api.onrender.com/api/docs)
 - [OpenAPI API](https://teamspeak-backend-api.onrender.com/api/openapi.json)
 - [Servidor realtime](https://teamspeak-backend-realtime.onrender.com)
@@ -188,6 +190,11 @@ prueba con credenciales dentro del repositorio.
 La API también expone `GET /health/firestore`. Este endpoint realiza una consulta
 real de solo lectura sobre `users`, sin devolver documentos privados, y responde
 `firestore: connected` cuando la integración está disponible.
+
+La evidencia de Sprint 0 se consulta mediante `GET /api/sprint0/demo`, que lee el
+documento `sprint_prueba/verificacion_sprint0` y devuelve sus campos reales dentro
+de `data`. Esta ruta es pública para facilitar la verificación del despliegue;
+responde `404` si el documento no existe y `503` si Firestore no está disponible.
 
 Para desplegar las reglas que bloquean el acceso directo desde clientes Firebase,
 usa Firebase CLI desde la carpeta `backend`:

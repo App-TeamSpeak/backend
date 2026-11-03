@@ -8,6 +8,7 @@ export const openapi = {
   servers: [{ url: '/', description: 'Servidor actual' }],
   tags: [
     { name: 'Health', description: 'Disponibilidad del servicio' },
+    { name: 'Sprint 0', description: 'Evidencia de verificación de Firestore' },
     { name: 'Users', description: 'Perfil y cuenta del estudiante' },
     { name: 'Rooms', description: 'Salas de estudio colaborativo' },
     { name: 'Messages', description: 'Historial persistente de chat' },
@@ -61,6 +62,18 @@ export const openapi = {
         tags: ['Health'],
         summary: 'Comprueba que la API responde',
         responses: { 200: { description: 'Servicio disponible' } },
+      },
+    },
+    '/api/sprint0/demo': {
+      get: {
+        tags: ['Sprint 0'],
+        summary: 'Devuelve el documento de verificación de Sprint 0',
+        description: 'Consulta sprint_prueba/verificacion_sprint0 en Firestore.',
+        responses: {
+          200: { description: 'Documento encontrado' },
+          404: { description: 'Documento no encontrado' },
+          503: { description: 'Firestore no disponible' },
+        },
       },
     },
     '/api/users/me': {
