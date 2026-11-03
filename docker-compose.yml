@@ -7,7 +7,7 @@ services:
     environment:
       NODE_ENV: ${NODE_ENV:-development}
       PORT: 10000
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://localhost:5173}
     ports:
       - "10000:10000"
     healthcheck:
@@ -30,7 +30,7 @@ services:
     environment:
       NODE_ENV: ${NODE_ENV:-development}
       PORT: 10000
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://localhost:5173}
     ports:
       - "10001:10000"
     healthcheck:
@@ -44,3 +44,19 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:10000}
+        VITE_REALTIME_URL: ${VITE_REALTIME_URL:-http://localhost:10001}
+    image: teamspeak-frontend:local
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+      realtime:
+        condition: service_healthy
