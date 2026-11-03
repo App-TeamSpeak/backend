@@ -1,0 +1,46 @@
+services:
+  api:
+    build:
+      context: ./backend-api
+      dockerfile: Dockerfile
+    image: teamspeak-backend-api:local
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 10000
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+    ports:
+      - "10000:10000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:10000/health').then((response) =>
+          process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  realtime:
+    build:
+      context: ./backend-realtime
+      dockerfile: Dockerfile
+    image: teamspeak-backend-realtime:local
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 10000
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+    ports:
+      - "10001:10000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:10000/health').then((response) =>
+          process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 5

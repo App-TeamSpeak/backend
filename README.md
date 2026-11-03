@@ -7,6 +7,17 @@ Backend del salón de estudio colaborativo en tiempo real.
 - `backend-api`: API REST, autenticación Firebase, Firestore y Swagger.
 - `backend-realtime`: Socket.IO, presencia, chat en tiempo real y señalización WebRTC.
 
+## Servicios desplegados
+
+- [API REST](https://teamspeak-backend-api.onrender.com)
+- [Health API](https://teamspeak-backend-api.onrender.com/health)
+- [Swagger API](https://teamspeak-backend-api.onrender.com/api/docs)
+- [OpenAPI API](https://teamspeak-backend-api.onrender.com/api/openapi.json)
+- [Servidor realtime](https://teamspeak-backend-realtime.onrender.com)
+- [Health realtime](https://teamspeak-backend-realtime.onrender.com/health)
+- [Swagger realtime](https://teamspeak-backend-realtime.onrender.com/api/docs)
+- [OpenAPI realtime](https://teamspeak-backend-realtime.onrender.com/api/openapi.json)
+
 ## Arquitectura sencilla
 
 Cada servicio mantiene la misma separación por responsabilidades:
@@ -114,6 +125,20 @@ docker logs -f teamspeak-backend-api-local
 docker logs -f teamspeak-backend-realtime-local
 ```
 
+También puedes usar los comandos automatizados del repositorio:
+
+```bash
+make docker-build
+make up
+make ps
+make logs
+make down
+```
+
+`make up` construye y levanta API y Realtime con `docker-compose.yml`. La API
+queda disponible en `http://localhost:10000` y Realtime en
+`http://localhost:10001`.
+
 Para detenerlos y eliminarlos cuando ya no se necesiten:
 
 ```bash
@@ -148,6 +173,30 @@ También puedes ejecutar todo el diagnóstico de un servicio con:
 ```bash
 npm run validate
 ```
+
+Para comprobar la conexión real con Firestore sin crear ni eliminar datos, configura
+las variables Firebase en `backend-api/.env` y ejecuta desde la raíz del backend:
+
+```bash
+make firestore-smoke
+```
+
+La prueba lista las colecciones existentes y falla si las credenciales, el proyecto
+o los permisos de Firestore no están configurados correctamente. No ejecutes esta
+prueba con credenciales dentro del repositorio.
+
+La API también expone `GET /health/firestore`. Este endpoint realiza una consulta
+real de solo lectura sobre `users`, sin devolver documentos privados, y responde
+`firestore: connected` cuando la integración está disponible.
+
+Para desplegar las reglas que bloquean el acceso directo desde clientes Firebase,
+usa Firebase CLI desde la carpeta `backend`:
+
+```bash
+firebase deploy --only firestore:rules
+```
+
+No ejecutes ese despliegue sin revisar antes el proyecto Firebase seleccionado.
 
 El análisis de SonarCloud espera el resultado del Quality Gate y falla el workflow
 cuando no se cumple. La política recomendada para configurar en SonarCloud está en

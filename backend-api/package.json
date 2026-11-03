@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "test:firestore": "tsx src/scripts/firestore-smoke.ts",
     "validate": "npm run lint && npm run typecheck && npm run test:coverage && npm run build"
   },
   "dependencies": {
