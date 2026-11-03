@@ -1,4 +1,4 @@
-import { cert, getApps, initializeApp, type App } from 'firebase-admin/app';
+import { applicationDefault, cert, getApps, initializeApp, type App } from 'firebase-admin/app';
 import { getAuth, type Auth } from 'firebase-admin/auth';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 import { env } from './env';
@@ -6,19 +6,27 @@ import { env } from './env';
 let firebaseApp: App | undefined;
 
 function getFirebaseApp(): App {
-  if (!env.FIREBASE_PROJECT_ID || !env.FIREBASE_CLIENT_EMAIL || !env.FIREBASE_PRIVATE_KEY) {
-    throw new Error('Firebase Admin no está configurado.');
+  if (firebaseApp) return firebaseApp;
+
+  const { FIREBASE_PROJECT_ID: projectId, FIREBASE_CLIENT_EMAIL: clientEmail, FIREBASE_PRIVATE_KEY: privateKey } = env;
+  if (projectId && clientEmail && privateKey) {
+    firebaseApp = getApps()[0] ?? initializeApp({
+      credential: cert({
+        projectId,
+        clientEmail,
+        privateKey: privateKey.replace(/\\n/g, '\n'),
+      }),
+    });
+    return firebaseApp;
   }
 
-  firebaseApp ??= getApps()[0] ?? initializeApp({
-    credential: cert({
-      projectId: env.FIREBASE_PROJECT_ID,
-      clientEmail: env.FIREBASE_CLIENT_EMAIL,
-      privateKey: env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-    }),
-  });
+  if (env.NODE_ENV === 'production') {
+    firebaseApp = getApps()[0] ?? initializeApp({ credential: applicationDefault() });
+    return firebaseApp;
+  }
 
-  return firebaseApp;
+  throw new Error('Firebase Admin no está configurado. Define las credenciales Firebase en el entorno.');
+
 }
 
 export function getFirebaseAuth(): Auth {

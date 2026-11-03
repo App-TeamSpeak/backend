@@ -185,6 +185,19 @@ La prueba lista las colecciones existentes y falla si las credenciales, el proye
 o los permisos de Firestore no están configurados correctamente. No ejecutes esta
 prueba con credenciales dentro del repositorio.
 
+La API también expone `GET /health/firestore`. Este endpoint realiza una consulta
+real de solo lectura sobre `users`, sin devolver documentos privados, y responde
+`firestore: connected` cuando la integración está disponible.
+
+Para desplegar las reglas que bloquean el acceso directo desde clientes Firebase,
+usa Firebase CLI desde la carpeta `backend`:
+
+```bash
+firebase deploy --only firestore:rules
+```
+
+No ejecutes ese despliegue sin revisar antes el proyecto Firebase seleccionado.
+
 El análisis de SonarCloud espera el resultado del Quality Gate y falla el workflow
 cuando no se cumple. La política recomendada para configurar en SonarCloud está en
 `docs/sonar-quality-policy.md`.
