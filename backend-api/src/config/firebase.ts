@@ -8,9 +8,15 @@ let firebaseApp: App | undefined;
 function getFirebaseApp(): App {
   if (firebaseApp) return firebaseApp;
 
+  const existingApp = getApps()[0];
+  if (existingApp) {
+    firebaseApp = existingApp;
+    return firebaseApp;
+  }
+
   const { FIREBASE_PROJECT_ID: projectId, FIREBASE_CLIENT_EMAIL: clientEmail, FIREBASE_PRIVATE_KEY: privateKey } = env;
   if (projectId && clientEmail && privateKey) {
-    firebaseApp = getApps()[0] ?? initializeApp({
+    firebaseApp = initializeApp({
       credential: cert({
         projectId,
         clientEmail,
