@@ -4,6 +4,7 @@ import {
   getFirestoreCollections,
   getRoomMembersCollection,
   getRoomMessagesCollection,
+  getSprint0DemoDocument,
 } from './firestore.service';
 
 const getFirestoreDb = vi.hoisted(() => vi.fn());
@@ -73,5 +74,21 @@ describe('Firestore service', () => {
 
     expect(getFirestoreDb).toHaveBeenCalledTimes(1);
     expect(get).toHaveBeenCalledTimes(1);
+  });
+  it('reads the Sprint 0 verification document and preserves its fields', async () => {
+    const data = { estado: 'ok', evidencia: 'real' };
+    const get = vi.fn().mockResolvedValue({ exists: true, data: () => data });
+    const doc = vi.fn(() => ({ get }));
+    const collection = vi.fn(() => ({ doc }));
+
+    await expect(getSprint0DemoDocument({ collection } as never)).resolves.toEqual(data);
+    expect(collection).toHaveBeenCalledWith('sprint_prueba');
+    expect(doc).toHaveBeenCalledWith('verificacion_sprint0');
+  });
+
+  it('returns null when the Sprint 0 verification document does not exist', async () => {
+    const firestore = { collection: vi.fn(() => ({ doc: vi.fn(() => ({ get: vi.fn().mockResolvedValue({ exists: false }) })) })) };
+
+    await expect(getSprint0DemoDocument(firestore as never)).resolves.toBeNull();
   });
 });
