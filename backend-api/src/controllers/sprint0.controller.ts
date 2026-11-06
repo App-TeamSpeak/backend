@@ -3,6 +3,7 @@ import { AppError } from '../middleware/errors';
 import { getSprint0DemoDocument } from '../services/firestore.service';
 
 export const sprint0DemoController: RequestHandler = async (_request, response, next) => {
+  response.setHeader('Cache-Control', 'no-store');
   try {
     const document = await getSprint0DemoDocument();
 

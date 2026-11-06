@@ -9,12 +9,13 @@ describe('Sprint 0 demo controller', () => {
   it('returns the real Firestore fields in the response', async () => {
     const data = { verificado: true, mensaje: 'Sprint 0 conectado' };
     getSprint0DemoDocument.mockResolvedValueOnce(data);
-    const response = { json: vi.fn() };
+    const response = { json: vi.fn(), setHeader: vi.fn() };
     const next = vi.fn();
 
     await sprint0DemoController({} as never, response as never, next);
 
     expect(response.json).toHaveBeenCalledWith({ success: true, data });
+    expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store');
     expect(next).not.toHaveBeenCalled();
   });
 
@@ -22,7 +23,7 @@ describe('Sprint 0 demo controller', () => {
     getSprint0DemoDocument.mockResolvedValueOnce(null);
     const next = vi.fn();
 
-    await sprint0DemoController({} as never, {} as never, next);
+    await sprint0DemoController({} as never, { setHeader: vi.fn() } as never, next);
 
     expect(next).toHaveBeenCalledWith(expect.any(AppError));
     const [error] = next.mock.calls[0] as [AppError];
@@ -34,7 +35,7 @@ describe('Sprint 0 demo controller', () => {
     getSprint0DemoDocument.mockRejectedValueOnce(new Error('connection failed'));
     const next = vi.fn();
 
-    await sprint0DemoController({} as never, {} as never, next);
+    await sprint0DemoController({} as never, { setHeader: vi.fn() } as never, next);
 
     expect(next).toHaveBeenCalledWith(expect.any(AppError));
     const [error] = next.mock.calls[0] as [AppError];

@@ -3,6 +3,8 @@ services:
     build:
       context: ./backend-api
       dockerfile: Dockerfile
+    env_file:
+      - ./backend-api/.env
     image: teamspeak-backend-api:local
     environment:
       NODE_ENV: ${NODE_ENV:-development}
@@ -26,6 +28,8 @@ services:
     build:
       context: ./backend-realtime
       dockerfile: Dockerfile
+    env_file:
+      - ./backend-realtime/.env
     image: teamspeak-backend-realtime:local
     environment:
       NODE_ENV: ${NODE_ENV:-development}
