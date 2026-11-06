@@ -1,0 +1,74 @@
+
+> validate
+> npm run lint && npm run typecheck && npm run test:coverage && npm run build
+
+
+> lint
+> tsc -p tsconfig.json --noEmit
+
+
+> typecheck
+> tsc -p tsconfig.json --noEmit
+
+
+> test:coverage
+> vitest run --coverage
+
+
+ RUN  v3.2.7 /home/lenovo/Documentos/ChatGPT/TeamSpeak/backend/backend-api
+      Coverage enabled with v8
+
+ ✓ src/config/firebase.test.ts (4 tests) 51ms
+ ✓ src/scripts/firestore-smoke.test.ts (3 tests) 6ms
+ ✓ src/controllers/health.controller.test.ts (2 tests) 7ms
+ ✓ src/controllers/sprint0.controller.test.ts (3 tests) 9ms
+ ✓ src/config/env.test.ts (2 tests) 134ms
+ ✓ src/services/firestore.service.test.ts (6 tests) 8ms
+ ✓ src/app.test.ts (4 tests) 42ms
+
+ Test Files  7 passed (7)
+      Tests  24 passed (24)
+   Start at  18:17:53
+   Duration  1.15s (transform 302ms, setup 0ms, collect 1.59s, tests 257ms, environment 2ms, prepare 764ms)
+
+ % Coverage report from v8
+-------------------|---------|----------|---------|---------|-------------------
+File               | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s 
+-------------------|---------|----------|---------|---------|-------------------
+All files          |   88.18 |    73.68 |   54.83 |   88.18 |                   
+ src               |   79.31 |    33.33 |       0 |   79.31 |                   
+  app.ts           |   95.83 |       50 |     100 |   95.83 | 15                
+  server.ts        |       0 |        0 |       0 |       0 | 1-6               
+ src/config        |     100 |       95 |     100 |     100 |                   
+  env.ts           |     100 |     87.5 |     100 |     100 | 8                 
+  firebase.ts      |     100 |      100 |     100 |     100 |                   
+ src/controllers   |   93.47 |      100 |   21.42 |   93.47 |                   
+  ...controller.ts |     100 |      100 |     100 |     100 |                   
+  ...controller.ts |     100 |      100 |       0 |     100 |                   
+  ...controller.ts |   72.72 |      100 |       0 |   72.72 | 12-14             
+  ...controller.ts |     100 |      100 |     100 |     100 |                   
+  ...controller.ts |     100 |      100 |       0 |     100 |                   
+ src/docs          |     100 |      100 |     100 |     100 |                   
+  openapi.ts       |     100 |      100 |     100 |     100 |                   
+ src/middleware    |   53.33 |    23.07 |      75 |   53.33 |                   
+  auth.ts          |   53.33 |     12.5 |     100 |   53.33 | 20,28-39,45-46    
+  errors.ts        |   53.33 |       40 |   66.66 |   53.33 | 17-22,26-33,45-51 
+ src/routes        |     100 |      100 |     100 |     100 |                   
+  api.routes.ts    |     100 |      100 |     100 |     100 |                   
+  health.routes.ts |     100 |      100 |     100 |     100 |                   
+  ...ges.routes.ts |     100 |      100 |     100 |     100 |                   
+  rooms.routes.ts  |     100 |      100 |     100 |     100 |                   
+  ...nt0.routes.ts |     100 |      100 |     100 |     100 |                   
+  users.routes.ts  |     100 |      100 |     100 |     100 |                   
+ src/scripts       |    92.3 |       75 |     100 |    92.3 |                   
+  ...tore-smoke.ts |    92.3 |       75 |     100 |    92.3 | 29-30             
+ src/services      |   81.25 |      100 |   83.33 |   81.25 |                   
+  ...re.service.ts |     100 |      100 |     100 |     100 |                   
+  ...er.service.ts |      25 |      100 |       0 |      25 | 4-9               
+ src/validators    |     100 |      100 |     100 |     100 |                   
+  ....validator.ts |     100 |      100 |     100 |     100 |                   
+-------------------|---------|----------|---------|---------|-------------------
+
+> build
+> tsc -p tsconfig.json
+

@@ -222,3 +222,31 @@ FIREBASE_PRIVATE_KEY=
 ```
 
 No guardes credenciales Firebase ni claves TURN en el repositorio.
+
+## Integración Sprint 0 con el frontend
+
+Clona `frontend` y `backend` en el mismo directorio padre. En este repositorio:
+
+```bash
+cp .env.example .env
+cp backend-api/.env.example backend-api/.env
+cp backend-realtime/.env.example backend-realtime/.env
+# Completa las tres variables FIREBASE_* en backend-api/.env con valores reales locales.
+docker compose up --build
+```
+
+Compose carga explícitamente los archivos locales de cada servicio. Esto es
+necesario: `dotenv` dentro de la imagen no lee el archivo del equipo anfitrión.
+El `.env` de la raíz configura URLs de build y CORS; las credenciales pertenecen
+a los archivos de cada servicio y no se versionan ni se pasan a Vite.
+
+La API responde `Cache-Control: no-store` en `/api/sprint0/demo` para que recargar
+el frontend o pulsar Actualizar vuelva a consultar Firestore. Solo debe haber
+campos públicos de demostración en `sprint_prueba/verificacion_sprint0` porque el
+endpoint es público. El health check de proceso no demuestra acceso a Firestore:
+verifica también `/health/firestore` y `/api/sprint0/demo`.
+
+En Render conserva el despliegue Docker y configura las tres variables
+`FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY` y el origen
+Vercel exacto en `CORS_ORIGINS`. La clave admite saltos de línea escapados.
+Los PR de esta entrega no se fusionan ni despliegan automáticamente por esta tarea.
