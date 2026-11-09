@@ -1,3 +1,15 @@
+const userProfileSchema = {
+        type: 'object', required: ['uid', 'email', 'nombre', 'apellido', 'username', 'usernameKey', 'avatarUrl', 'profileStatus', 'createdAt', 'updatedAt'],
+        properties: {
+          uid: { type: 'string' }, email: { type: 'string', format: 'email' },
+          nombre: { type: 'string' }, apellido: { type: 'string' },
+          username: { type: 'string' }, usernameKey: { type: 'string' },
+          avatarUrl: { type: 'string', nullable: true, format: 'uri' },
+          profileStatus: { type: 'string', enum: ['complete'] },
+          createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' },
+        },
+      } as const;
+
 export const openapi = {
   openapi: '3.0.3',
   info: {
@@ -24,7 +36,31 @@ export const openapi = {
         properties: {
           success: { type: 'boolean', example: false },
           code: { type: 'string', example: 'AUTH_REQUIRED' },
+          details: { type: 'array', items: { type: 'object' }, description: 'Detalles de validación cuando corresponde.' },
           message: { type: 'string', example: 'Se requiere un token Bearer válido.' },
+        },
+      },
+      UserInput: {
+        type: 'object', additionalProperties: false, required: ['nombre', 'apellido', 'username'],
+        properties: {
+          nombre: { type: 'string', description: 'Se recortan espacios exteriores. El valor recortado debe tener 1–100 caracteres y no estar vacío.' },
+          apellido: { type: 'string', description: 'Se recortan espacios exteriores; el valor resultante debe tener 1–100 caracteres y no estar vacío.' },
+          username: { type: 'string', pattern: '^\\s*[A-Za-z0-9_-]{8,30}\\s*$', description: 'Se recortan espacios exteriores; letras ASCII, números, - y _. Conserva mayúsculas para mostrar; unicidad sin distinguir mayúsculas mediante usernameKey.' },
+          avatarUrl: { type: 'string', nullable: true, description: 'URL HTTPS válida después de recortar espacios exteriores, máximo 2048 caracteres normalizados. Omitido se almacena como null.' },
+        },
+      },
+      UserProfile: userProfileSchema,
+      UserResponse: {
+        type: 'object', required: ['success', 'data'],
+        properties: {
+          success: { type: 'boolean', enum: [true] },
+          data: {
+            type: 'object', required: ['uid', 'profileStatus', 'profile'],
+            properties: {
+              uid: { type: 'string' }, profileStatus: { type: 'string', enum: ['complete', 'incomplete'] },
+              profile: { ...userProfileSchema, nullable: true, description: 'null si no existe un perfil completo recuperable; documentos inconsistentes producen 409.' },
+            },
+          },
         },
       },
       Room: {
@@ -78,10 +114,29 @@ export const openapi = {
     },
     '/api/users/me': {
       get: {
-        tags: ['Users'],
-        security: [{ bearerAuth: [] }],
-        summary: 'Obtiene el perfil autenticado',
-        responses: { 501: { description: 'Ruta preparada; persistencia pendiente' }, 401: { description: 'No autenticado' } },
+        tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Consulta el perfil de la identidad autenticada',
+        description: '200 con profileStatus incomplete y profile null si falta un perfil completo. No implica token inválido. Cache-Control: no-store.',
+        responses: {
+          200: { description: 'Estado del perfil', content: { 'application/json': { schema: { $ref: '#/components/schemas/UserResponse' } } } },
+          401: { description: 'AUTH_REQUIRED o AUTH_INVALID', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          409: { description: 'PROFILE_INCONSISTENT', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          500: { description: 'INTERNAL_ERROR', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          503: { description: 'AUTH_UNAVAILABLE o FIRESTORE_UNAVAILABLE', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+      post: {
+        tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Crea el perfil y reserva el username atómicamente',
+        description: 'UID y email proceden del token Firebase. Reintentos con los mismos datos normalizados devuelven 200 sin escrituras. Completa perfiles recuperables sin reemplazar campos existentes; responde 200 en recuperación. No actualiza perfiles completos. Cache-Control: no-store.',
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/UserInput' } } } },
+        responses: {
+          201: { description: 'Perfil creado', content: { 'application/json': { schema: { $ref: '#/components/schemas/UserResponse' } } } },
+          200: { description: 'Reintento idempotente o perfil incompleto recuperado', content: { 'application/json': { schema: { $ref: '#/components/schemas/UserResponse' } } } },
+          400: { description: 'VALIDATION_ERROR, INVALID_JSON o AUTH_EMAIL_REQUIRED', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: 'AUTH_REQUIRED o AUTH_INVALID', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          409: { description: 'USERNAME_TAKEN, PROFILE_ALREADY_EXISTS o PROFILE_INCONSISTENT', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          500: { description: 'INTERNAL_ERROR', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          503: { description: 'AUTH_UNAVAILABLE o FIRESTORE_UNAVAILABLE', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
       },
       patch: {
         tags: ['Users'],

@@ -6,7 +6,11 @@ export interface UserDocument {
   apellido: string;
   email: string;
   username: string;
-  avatarUrl: string;
+  avatarUrl: string | null;
+  usernameKey: string;
+  profileStatus: 'complete';
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
 }
 
 export interface UsernameDocument {
