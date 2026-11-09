@@ -68,8 +68,8 @@ Los archivos de integración quedan fuera de la cobertura unitaria.
 
 El emulador permite comprobar persistencia y concurrencia locales. No acredita
 IAM, latencia, cuotas, índices ni todos los comportamientos de producción.
-No se prueba Firebase Authentication: las identidades del servicio son datos
-controlados. DELETE permanece fuera de esta etapa.
+La suite Firestore usa identidades controladas; la suite conjunta de TS-01.4B
+verifica Authentication Emulator como se describe más abajo. DELETE permanece fuera de esta etapa.
 
 ## Puerto configurable y Node 24
 
@@ -192,14 +192,97 @@ antes/después de rechazos; al competir POST/PATCH con el marcador, el estado fi
 debe coincidir con el que leyó la transacción que confirmó el bloqueo. También
 comprueban operaciones confirmadas previamente y marcadores de otros UID.
 
-DELETE sigue sin implementar. Antes de habilitarlo será obligatorio añadir el
-control de estado en backend-realtime (handshake, eventos y sockets existentes).
-También deberá definirse la ruta de DELETE para permitir el tratamiento autorizado
-de un proceso ya iniciado: el middleware global actual bloquea cualquier recurso
-privado cuando hay un marcador. No hay excepciones ni mecanismo de reanudación
-autorizado en esta etapa.
+La eliminación irreversible y la conciliación siguen sin implementar. Antes de
+habilitar uso público será obligatorio añadir el control de estado en
+backend-realtime (handshake, eventos y sockets existentes). TS-01.4B introduce una
+excepción exacta para DELETE /api/users/me con autenticación propia y activación
+restringida a pruebas; los recursos privados normales conservan el bloqueo.
 
 Verificación de esta base (Node 24.18.0): 177/177 pruebas unitarias/HTTP y
 31/31 de integración real, preservando las 180 anteriores. Las dos carreras
 POST/PATCH contra el marcador pasaron. Cobertura: instrucciones/líneas 95,97 %,
 ramas 92,05 %, funciones 72,09 %. Sin operaciones contra Firebase real.
+
+
+## TS-01.4B: inicio de eliminación, exclusivamente en pruebas
+
+Requisitos adicionales: Authentication Emulator local. Firebase CLI lo inicia
+junto a Firestore sin nuevas dependencias del proyecto. Puerto Auth predeterminado
+9099, configurable con `TEAMSPEAK_AUTH_PORT`; Firestore conserva 8081 y
+`TEAMSPEAK_FIRESTORE_PORT`. Ambos deben ser distintos y estar libres.
+
+```bash
+source "$HOME/.nvm/nvm.sh"
+nvm use 24
+npm run test:integration          # suite Firestore anterior, DELETE deshabilitado
+npm run test:integration:deletion # suite conjunta, habilitación explícita de pruebas
+# Puertos alternativos:
+TEAMSPEAK_FIRESTORE_PORT=8082 TEAMSPEAK_AUTH_PORT=9100 npm run test:integration:deletion
+```
+
+Con herramientas temporales de esta máquina, usar el mismo PATH y
+TEAMSPEAK_FIREBASE_CLI del ejemplo anterior con el nuevo comando. No se requiere
+login, usuarios reales ni cambios en Firebase Console. Las sondas de ambos
+emuladores deben responder antes de las operaciones SDK; la suite reinicia solo
+las bases demo locales entre casos y la CLI apaga ambos emuladores al finalizar.
+
+El launcher habilita TEAMSPEAK_ENABLE_DELETE_TESTS=true únicamente para la suite
+conjunta y fija FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:<puerto>, sin protocolo.
+El endpoint y el servicio verifican simultáneamente NODE_ENV=test, ambos project
+IDs demo-teamspeak-tests, los dos hosts loopback válidos y distintos, ausencia de
+credenciales, DOTENV_CONFIG_PATH=/dev/null y la habilitación explícita. También se
+comprueba el project ID de las instancias SDK. Una variable aislada no habilita
+DELETE. Fuera de estas condiciones devuelve 501 antes de usar los SDK.
+
+Solo DELETE /api/users/me omite requireActiveAccount. Utiliza verificación propia
+verifyIdToken(token, true); GET/POST/PATCH no cambian su autenticación ni acceso.
+No admite cuerpo. El UID y auth_time provienen del token verificado. Una intención
+nueva requiere auth_time entero positivo, no futuro, con antigüedad <=300 segundos;
+iat y la simple renovación del token no satisfacen esta condición.
+
+US-05 deberá reautenticar con EmailAuthProvider/reauthenticateWithCredential para
+correo/contraseña o reauthenticateWithPopup/Redirect/Credential para Google según
+el flujo del frontend, y obtener el token actualizado. No se implementan formularios.
+
+Errores públicos de autenticación: AUTH_REQUIRED, AUTH_INVALID, AUTH_EXPIRED,
+AUTH_REVOKED, AUTH_USER_DISABLED, AUTH_USER_DELETED y AUTH_RECENT_REQUIRED (401).
+Errores conocidos de red/cuota son 503 AUTH_UNAVAILABLE; errores internos
+inesperados son 500 INTERNAL_ERROR. No se devuelven mensajes internos del SDK.
+
+La transacción inicial lee marcador, perfil y consulta las reservas por UID.
+Valida la propiedad explícita del perfil cuando está presente, la coherencia de
+username/usernameKey y la propiedad de cada reserva. Solo registra claves de
+documentos propios existentes. Un perfil inexistente no se fabrica; un perfil
+incompleto puede eliminarse si la propiedad es segura. Si la reserva declarada no
+existe no se inventa ni se incluye; si pertenece a otro UID se rechaza con
+PROFILE_INCONSISTENT. Pueden registrarse varias reservas propias verificadas para
+la futura limpieza de esa cuenta; no se eliminan ni se reparan en esta etapa.
+
+Se crea únicamente accountDeletions/{uid} con pending/auth, usernameKeys, dos
+Timestamp y attempts=0. No hay llamadas Authentication dentro de la transacción.
+Un pending válido se reutiliza sin exigir nueva recencia, pero siempre con token
+verificado y revocación comprobada. Se vuelve a comprobar que las reservas
+registradas existentes no pertenezcan a otros UID; en phase=auth deben existir.
+La fase firestore puede tolerar reservas ausentes por limpieza futura. No se
+reinician fechas/intentos/fases ni se sustituyen las claves. blocked/completed
+válidos devuelven 409 ACCOUNT_DELETION_BLOCKED/ACCOUNT_DELETED; un marcador inválido
+devuelve 409 ACCOUNT_DELETION_INCONSISTENT. Nunca devuelve 200 completed.
+
+Respuesta: 202 { success: true, data: { status: "pending" } }. Significa intención
+persistida, NO eliminación terminada. Los emuladores comprueban que identidad,
+perfil y reservas siguen presentes y que las carreras capturan las reservas
+vigentes. DELETE sigue deshabilitado públicamente mientras faltan procesamiento,
+conciliación y protección realtime (TS-01.4C/4D).
+
+Límite: Authentication Emulator emite tokens sin la firma criptográfica de
+producción. Estas pruebas comprueban el flujo SDK/HTTP local, no la validación de
+firmas reales ni el login Google real. Los fallos controlados y auth_time inválidos
+se prueban con mocks. Las identidades solo se limpian mediante el reset de fixtures
+del emulador; el endpoint nunca llama deleteUser ni elimina documentos.
+
+Resultado TS-01.4B (Node 24.18.0, 9 de noviembre de 2026): lint/build correctos;
+227/227 pruebas unitarias/HTTP, 31/31 Firestore anteriores y 12/12 conjuntas,
+270 casos aprobados en total, incluidos los 208 previos. Nuevos: 50 casos
+unitarios/HTTP/contrato y 12 de integración conjunta. Cobertura: instrucciones y
+líneas 96,68 %, ramas 91,17 %, funciones 78,43 %. Ambos emuladores se detuvieron
+mediante emulators:exec. No se modificaron dependencias ni se realizaron commits.

@@ -15,6 +15,7 @@
     "test:coverage": "vitest run --coverage",
     "test:firestore": "tsx src/scripts/firestore-smoke.ts",
     "validate": "npm run lint && npm run typecheck && npm run test:coverage && npm run build",
+    "test:integration:deletion": "node scripts/firestore-integration.cjs --with-auth",
     "test:integration": "node scripts/firestore-integration.cjs",
     "test:integration:run": "node scripts/firestore-integration.cjs --run"
   },

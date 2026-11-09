@@ -22,7 +22,7 @@ export const openapi = {
   info: {
     title: 'TeamSpeak Study Room API',
     version: '0.1.0',
-    description: 'API REST para autenticación, perfiles, salas de estudio y mensajes persistentes. Identidad autenticada no implica cuenta activa ni perfil completo: las rutas privadas rechazan cualquier marcador accountDeletions del UID, incluso completado o bloqueado. DELETE aún no está implementado.',
+    description: 'API REST para autenticación, perfiles, salas de estudio y mensajes persistentes. Identidad autenticada no implica cuenta activa ni perfil completo: las rutas privadas rechazan cualquier marcador accountDeletions del UID, incluso completado o bloqueado. La eliminación real aún no está implementada; DELETE solo puede registrar intenciones en pruebas explícitamente aisladas.',
   },
   servers: [{ url: '/', description: 'Servidor actual' }],
   tags: [
@@ -168,11 +168,19 @@ export const openapi = {
         },
       },
       delete: {
-        tags: ['Users'],
-        security: [{ bearerAuth: [] }],
-        summary: 'Elimina la cuenta autenticada',
+        tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Inicio de eliminación provisional, solo en pruebas aisladas',
+        description: 'Deshabilitado públicamente: 501. Solo se habilita con NODE_ENV=test, proyecto demo-teamspeak-tests, ambos emuladores locales y activación explícita de la suite. No admite cuerpo. Verifica revocación con Firebase Admin; una intención nueva requiere auth_time entero, no futuro y de máximo 300 segundos. Una intención pending válida puede repetirse con identidad vigente sin reiniciar progreso ni exigir de nuevo autenticación reciente. 202 solo significa intención persistida; NO elimina identidad, perfil o reservas. Estados blocked/completed/malformados no se reinician. US-05 deberá reautenticar mediante credencial de correo/contraseña o proveedor Google y obtener un token actualizado. TS-01.4C/4D siguen pendientes.',
         responses: {
-          403: { description: 'ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada; eliminación pendiente' }, 401: { description: 'No autenticado' } },
+          202: { description: 'Intención pending creada o reutilizada; eliminación no completada', content: { 'application/json': { schema: {
+            type: 'object', required: ['success', 'data'], properties: { success: { type: 'boolean', enum: [true] }, data: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['pending'] } } } },
+          }, example: { success: true, data: { status: 'pending' } } } } },
+          400: { description: 'VALIDATION_ERROR (cuerpo no permitido) o INVALID_JSON' },
+          401: { description: 'AUTH_REQUIRED, AUTH_INVALID, AUTH_EXPIRED, AUTH_REVOKED, AUTH_USER_DISABLED, AUTH_USER_DELETED o AUTH_RECENT_REQUIRED' },
+          409: { description: 'PROFILE_INCONSISTENT, ACCOUNT_DELETION_BLOCKED, ACCOUNT_DELETED o ACCOUNT_DELETION_INCONSISTENT' },
+          501: { description: 'NOT_IMPLEMENTED: endpoint deshabilitado fuera de pruebas aisladas' },
+          503: { description: 'AUTH_UNAVAILABLE o FIRESTORE_UNAVAILABLE' },
+          500: { description: 'INTERNAL_ERROR' },
+        },
       },
     },
     '/api/rooms': {
