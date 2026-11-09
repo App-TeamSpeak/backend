@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppError } from '../middleware/errors';
+vi.mock('../services/account-state.service', () => ({ ensureAccountActive: async () => undefined }));
 const mocks = vi.hoisted(() => ({ verifyIdToken: vi.fn(), getFirebaseAuth: vi.fn(), getUserProfile: vi.fn(), createUserProfile: vi.fn(), updateUserProfile: vi.fn() }));
 vi.mock('../config/firebase', () => ({ getFirebaseAuth: mocks.getFirebaseAuth }));
 vi.mock('../services/users.service', () => ({ getUserProfile: mocks.getUserProfile, createUserProfile: mocks.createUserProfile, updateUserProfile: mocks.updateUserProfile }));

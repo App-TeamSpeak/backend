@@ -1,9 +1,9 @@
 import { Timestamp, type Firestore } from 'firebase-admin/firestore';
 import { z } from 'zod';
-import { getFirestoreDb } from '../config/firebase';
 import { AppError } from '../middleware/errors';
 import { userBodySchema, userPatchSchema, type UserPatch, type UserBody } from '../validators/user.validator';
-import { getFirestoreCollections } from './firestore.service';
+import { assertNoAccountDeletion, ensureAccountActive } from './account-state.service';
+import { getFirestoreCollections, withFirestore } from './firestore.service';
 import type { UserDocument } from './firestore.documents';
 
 export interface UserIdentity { uid: string; email?: string }
@@ -38,20 +38,9 @@ function inspectProfile(value: unknown, uid: string) {
 function serialize(profile: UserDocument) {
   return { ...profile, createdAt: profile.createdAt.toDate().toISOString(), updatedAt: profile.updatedAt.toDate().toISOString() };
 }
-async function withFirestore<T>(operation: (db: Firestore) => Promise<T>, db?: Firestore): Promise<T> {
-  try {
-    return await operation(db ?? getFirestoreDb());
-  } catch (error) {
-    if (error instanceof AppError) throw error;
-    const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
-    if (new Set<unknown>([4, 8, 10, 14, 'deadline-exceeded', 'resource-exhausted', 'aborted', 'unavailable']).has(code)) {
-      throw new AppError(503, 'FIRESTORE_UNAVAILABLE', 'Firestore no está disponible.');
-    }
-    throw new AppError(500, 'INTERNAL_ERROR', 'Ocurrió un error interno.');
-  }
-}
 export async function getUserProfile(identity: UserIdentity, db?: Firestore) {
   return withFirestore(async (firestore) => {
+    await ensureAccountActive(identity.uid, firestore);
     const snapshot = await getFirestoreCollections(firestore).users.doc(identity.uid).get();
     const profile = snapshot.exists ? inspectProfile(snapshot.data(), identity.uid).complete : null;
     return { uid: identity.uid, profileStatus: profile ? 'complete' as const : 'incomplete' as const, profile: profile ? serialize(profile) : null };
@@ -64,11 +53,12 @@ export async function createUserProfile(identity: UserIdentity, input: UserBody,
   }
   const email = identity.email;
   return withFirestore(async (firestore) => {
-    const { users, usernames } = getFirestoreCollections(firestore);
+    const { users, usernames, accountDeletions } = getFirestoreCollections(firestore);
     const profileRef = users.doc(identity.uid);
     const usernameKey = body.username.toLowerCase();
     const usernameRef = usernames.doc(usernameKey);
     return firestore.runTransaction(async (transaction) => {
+      assertNoAccountDeletion(await transaction.get(accountDeletions.doc(identity.uid)));
       const profileSnapshot = await transaction.get(profileRef);
       const existing = profileSnapshot.exists ? inspectProfile(profileSnapshot.data(), identity.uid) : null;
       const oldKey = existing?.partial.usernameKey ?? existing?.partial.username?.toLowerCase();
@@ -118,9 +108,10 @@ export async function createUserProfile(identity: UserIdentity, input: UserBody,
 export async function updateUserProfile(identity: UserIdentity, input: UserPatch, db?: Firestore) {
   const patch = userPatchSchema.parse(input);
   return withFirestore(async (firestore) => {
-    const { users, usernames } = getFirestoreCollections(firestore);
+    const { users, usernames, accountDeletions } = getFirestoreCollections(firestore);
     const profileRef = users.doc(identity.uid);
     return firestore.runTransaction(async (transaction) => {
+      assertNoAccountDeletion(await transaction.get(accountDeletions.doc(identity.uid)));
       const snapshot = await transaction.get(profileRef);
       if (!snapshot.exists) throw new AppError(404, 'PROFILE_NOT_FOUND', 'Completa el registro mediante POST /api/users/me.');
       const profile = inspectProfile(snapshot.data(), identity.uid).complete;

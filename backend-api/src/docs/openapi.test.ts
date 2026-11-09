@@ -66,4 +66,15 @@ describe('OpenAPI user contracts', () => {
     }
   });
 
+  it('documents account access separately from authentication and profile completeness', () => {
+    expect(openapi.info.description).toContain('Identidad autenticada no implica cuenta activa');
+    const route = openapi.paths['/api/users/me'];
+    for (const method of ['get', 'post', 'patch'] as const) {
+      expect(route[method].responses[403].description).toContain('ACCOUNT_DELETION_PENDING');
+      expect(route[method].responses[403].description).toContain('ACCOUNT_DELETION_BLOCKED');
+      expect(route[method].responses[403].description).toContain('ACCOUNT_DELETED');
+    }
+    expect(route.delete.responses[501]).toBeDefined();
+  });
+
 });

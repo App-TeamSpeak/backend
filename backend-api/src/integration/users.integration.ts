@@ -233,4 +233,68 @@ describe('real Firestore Emulator user persistence', () => {
     expect(await documents()).toEqual(before);
   });
 
+
+  it.each(['pending', 'completed', 'blocked'] as const)('account deletion: %s blocks GET, POST, PATCH without modifying data', async (status) => {
+    await createUserProfile(identity('user-a'), body(), db);
+    const now = Timestamp.now();
+    await db.doc('accountDeletions/user-a').create({ status, phase: status === 'completed' ? 'done' : 'auth', usernameKeys: ['ana-user1'], requestedAt: now, updatedAt: now, attempts: 0 });
+    const before = await documents();
+    const marker = (await db.doc('accountDeletions/user-a').get()).data();
+    await expect(getUserProfile(identity('user-a'), db)).rejects.toMatchObject({ statusCode: 403 });
+    await expect(createUserProfile(identity('user-a'), body(), db)).rejects.toMatchObject({ statusCode: 403 });
+    await expect(updateUserProfile(identity('user-a'), { username: 'Ana-User2', nombre: 'Nueva' }, db)).rejects.toMatchObject({ statusCode: 403 });
+    expect(await documents()).toEqual(before);
+    expect((await db.doc('accountDeletions/user-a').get()).data()).toEqual(marker);
+  });
+  it('account deletion: marker prevents POST even when profile is absent', async () => {
+    await db.doc('accountDeletions/user-a').create({ status: 'completed' });
+    await expect(createUserProfile(identity('user-a'), body(), db)).rejects.toMatchObject({ code: 'ACCOUNT_DELETED' });
+    expect(await documents()).toEqual({ users: [], usernames: [] });
+  });
+  it('account deletion: another UID marker does not block an active account', async () => {
+    await db.doc('accountDeletions/other').create({ status: 'pending' });
+    await createUserProfile(identity('user-a'), body(), db);
+    await updateUserProfile(identity('user-a'), { nombre: 'Nueva' }, db);
+    expect((await getUserProfile(identity('user-a'), db)).profile?.nombre).toBe('Nueva');
+  });
+  it.each(['POST', 'PATCH'] as const)('account deletion: concurrent %s and marker serialize without writes after blocking', async (method) => {
+    if (method === 'PATCH') await createUserProfile(identity('user-a'), body(), db);
+    const refs = [db.doc('users/user-a'), db.doc('usernames/ana-user1'), db.doc('usernames/ana-user2')];
+    const markerRef = db.doc('accountDeletions/user-a');
+    const mark = () => db.runTransaction(async (tx) => {
+      await tx.get(markerRef);
+      const snapshots = [];
+      for (const ref of refs) snapshots.push(await tx.get(ref));
+      const now = Timestamp.now();
+      tx.create(markerRef, { status: 'pending', phase: 'auth', usernameKeys: [], requestedAt: now, updatedAt: now, attempts: 0 });
+      return snapshots.map((snapshot) => snapshot.exists ? snapshot.data() : null);
+    });
+    const operation = method === 'POST'
+      ? createUserProfile(identity('user-a'), body(), db)
+      : updateUserProfile(identity('user-a'), { username: 'Ana-User2' }, db);
+    const [operationResult, markerResult] = await Promise.allSettled([operation, mark()]);
+    expect(markerResult.status).toBe('fulfilled');
+    if (operationResult.status === 'rejected') expect(operationResult.reason).toMatchObject({ statusCode: 403, code: 'ACCOUNT_DELETION_PENDING' });
+    if (markerResult.status !== 'fulfilled') throw new Error('Marker transaction failed');
+    const after = await Promise.all(refs.map(async (ref) => { const snapshot = await ref.get(); return snapshot.exists ? snapshot.data() : null; }));
+    // The final state equals what the marker's serializable transaction observed:
+    // the profile operation either committed before it or was rejected on retry.
+    expect(after).toEqual(markerResult.value);
+    const stable = await documents();
+    await expect(createUserProfile(identity('user-a'), body(), db)).rejects.toMatchObject({ statusCode: 403 });
+    await expect(updateUserProfile(identity('user-a'), { nombre: 'Después del bloqueo' }, db)).rejects.toMatchObject({ statusCode: 403 });
+    expect(await documents()).toEqual(stable);
+  });
+  it.each(['POST', 'PATCH'] as const)('account deletion: %s committed before marker remains consistent', async (method) => {
+    if (method === 'PATCH') await createUserProfile(identity('user-a'), body(), db);
+    if (method === 'POST') await createUserProfile(identity('user-a'), body(), db);
+    else await updateUserProfile(identity('user-a'), { username: 'Ana-User2' }, db);
+    const before = await documents();
+    await db.runTransaction(async (tx) => { const ref = db.doc('accountDeletions/user-a'); await tx.get(ref); tx.create(ref, { status: 'pending' }); });
+    await expect(updateUserProfile(identity('user-a'), { nombre: 'Nueva' }, db)).rejects.toMatchObject({ statusCode: 403 });
+    expect(await documents()).toEqual(before);
+    const user = (await db.doc('users/user-a').get()).data();
+    expect(before.usernames).toEqual([{ id: user?.usernameKey, uid: 'user-a', usernameKey: user?.usernameKey }]);
+  });
+
 });

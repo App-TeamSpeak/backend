@@ -158,3 +158,48 @@ unitarias/HTTP y 22/22 de integración real aprobadas (103 y 11 anteriores
 conservadas). Lint y build correctos. Cobertura unitaria: instrucciones/líneas
 95,74 %, ramas 90,90 %, funciones 70 %. Integración ejecutada en 8081 con
 semilla 42; emulador detenido automáticamente al finalizar.
+
+## Base de bloqueo por eliminación de cuenta
+
+`accountDeletions/{uid}` identifica el proceso por el UID, sin copiar el perfil.
+El modelo tipado contempla status (pending/completed/blocked), phase
+(auth/firestore/done), usernameKeys, requestedAt, updatedAt, completedAt opcional,
+attempts, nextAttemptAt opcional y lastErrorCode opcional. Esta etapa no crea
+marcadores desde endpoints ni ejecuta eliminación o conciliación.
+
+La existencia de cualquier documento bloquea la cuenta. Los estados pending,
+blocked y completed devuelven 403 ACCOUNT_DELETION_PENDING,
+ACCOUNT_DELETION_BLOCKED y ACCOUNT_DELETED respectivamente. Un marcador malformado
+o con estado desconocido también se rechaza (ACCOUNT_DELETION_PENDING), sin
+exponer su contenido. Los fallos de lectura nunca autorizan el acceso.
+
+Conceptos separados: requireAuth establece identidad; requireActiveAccount
+comprueba acceso mediante Firestore; los servicios de perfil determinan si está
+completo. Una cuenta activa puede tener perfil incompleto. Un perfil completo no
+habilita acceso si existe un marcador.
+
+Todas las rutas privadas de backend-api utilizan el middleware de cuenta activa.
+GET además comprueba el marcador desde el servicio. POST y PATCH lo leen dentro
+de sus propias transacciones, antes de perfiles, reservas o escrituras; no dependen
+solo de una comprobación previa de middleware. No se usa una caché en memoria.
+Las peticiones que ya pasaron una comprobación de lectura pueden estar en vuelo;
+la garantía transaccional contra escrituras posteriores al bloqueo corresponde a
+POST/PATCH. La futura creación del marcador debe ser transaccional para ordenar
+esas operaciones.
+
+Los tests insertan marcadores únicamente en el emulador demo. Comparan documentos
+antes/después de rechazos; al competir POST/PATCH con el marcador, el estado final
+debe coincidir con el que leyó la transacción que confirmó el bloqueo. También
+comprueban operaciones confirmadas previamente y marcadores de otros UID.
+
+DELETE sigue sin implementar. Antes de habilitarlo será obligatorio añadir el
+control de estado en backend-realtime (handshake, eventos y sockets existentes).
+También deberá definirse la ruta de DELETE para permitir el tratamiento autorizado
+de un proceso ya iniciado: el middleware global actual bloquea cualquier recurso
+privado cuando hay un marcador. No hay excepciones ni mecanismo de reanudación
+autorizado en esta etapa.
+
+Verificación de esta base (Node 24.18.0): 177/177 pruebas unitarias/HTTP y
+31/31 de integración real, preservando las 180 anteriores. Las dos carreras
+POST/PATCH contra el marcador pasaron. Cobertura: instrucciones/líneas 95,97 %,
+ramas 92,05 %, funciones 72,09 %. Sin operaciones contra Firebase real.

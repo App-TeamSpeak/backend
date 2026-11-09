@@ -6,7 +6,7 @@ const profile = { ...identity, nombre: 'Ana', apellido: 'Pérez', username: 'Ana
 function database(user: unknown = profile, reservations: Record<string, unknown> = { 'ana-user1': { uid: identity.uid, usernameKey: 'ana-user1' } }) {
   const ref = (collection: string, id: string) => ({ collection, id });
   const get = vi.fn(async (reference: ReturnType<typeof ref>) => {
-    const value = reference.collection === 'users' ? user : reservations[reference.id];
+    const value = reference.collection === 'accountDeletions' ? undefined : reference.collection === 'users' ? user : reservations[reference.id];
     return { exists: value !== null && value !== undefined, data: () => value };
   });
   const tx = { get, create: vi.fn(), update: vi.fn(), delete: vi.fn() };

@@ -13,9 +13,9 @@ function database(user?: unknown, reservation?: unknown) {
   const get = vi.fn(async (ref: string) => ({ exists: (ref === 'users' ? user : reservation) !== undefined, data: () => ref === 'users' ? user : reservation }));
   const transaction = { get, create, set };
   const runTransaction = vi.fn(async (callback: (tx: unknown) => unknown) => callback(transaction));
-  const doc = vi.fn((name: string, id: string) => ({ name, id, get: async () => ({ exists: user !== undefined, data: () => user }) }));
+  const doc = vi.fn((name: string, id: string) => ({ name, id, get: async () => ({ exists: name !== 'accountDeletions' && user !== undefined, data: () => name === 'accountDeletions' ? undefined : user }) }));
   const db = { collection: (name: string) => ({ doc: (id: string) => doc(name, id) }), runTransaction };
-  get.mockImplementation(async (ref) => { const data = (ref as unknown as { name: string }).name === 'users' ? user : reservation; return { exists: data !== undefined, data: () => data }; });
+  get.mockImplementation(async (ref) => { const name = (ref as unknown as { name: string }).name; const data = name === 'accountDeletions' ? undefined : name === 'users' ? user : reservation; return { exists: data !== undefined, data: () => data }; });
   return { db: db as unknown as Firestore, create, get, runTransaction, doc, set };
 }
 
