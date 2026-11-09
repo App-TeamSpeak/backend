@@ -10,6 +10,7 @@ function matches(value: unknown, schema: Record<string, any>): boolean {
   if (schema.type === 'object') {
     if (typeof value !== 'object' || Array.isArray(value)) return false;
     const object = value as Record<string, unknown>;
+    if (schema.minProperties && Object.keys(object).length < schema.minProperties) return false;
     if (schema.required?.some((key: string) => !(key in object))) return false;
     return Object.entries(object).every(([key, item]) => schema.properties?.[key]
       ? matches(item, schema.properties[key]) : schema.additionalProperties !== false);
@@ -50,4 +51,19 @@ describe('OpenAPI user contracts', () => {
     expect(route.get.responses[409].description).toContain('PROFILE_INCONSISTENT');
     expect(route.post.security).toEqual([{ bearerAuth: [] }]);
   });
+  it('documents partial input without required fields and rejects empty/unknown payloads', () => {
+    const schema = openapi.components.schemas.UserPatch;
+    expect(matches({ nombre: ' Ana María ' }, schema)).toBe(true);
+    expect(matches({ avatarUrl: null }, schema)).toBe(true);
+    expect(matches({}, schema)).toBe(false);
+    expect(matches({ uid: 'other' }, schema)).toBe(false);
+    expect(schema).not.toHaveProperty('required');
+    const patch = openapi.paths['/api/users/me'].patch;
+    expect(patch.security).toEqual([{ bearerAuth: [] }]);
+    expect(Object.keys(patch.responses)).toEqual(expect.arrayContaining(['200', '400', '401', '404', '409', '500', '503']));
+    for (const example of Object.values(patch.requestBody.content['application/json'].examples)) {
+      expect(matches(example.value, schema)).toBe(true);
+    }
+  });
+
 });

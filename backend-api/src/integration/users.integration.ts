@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { deleteApp, initializeApp } from 'firebase-admin/app';
 import { getFirestore, Timestamp } from 'firebase-admin/firestore';
-import { createUserProfile, getUserProfile } from '../services/users.service';
+import { createUserProfile, getUserProfile, updateUserProfile } from '../services/users.service';
 import { userBodySchema } from '../validators/user.validator';
 
 const project = 'demo-teamspeak-tests';
@@ -120,4 +120,117 @@ describe('real Firestore Emulator user persistence', () => {
     await expect(createUserProfile(identity('user-a'), body(), db)).rejects.toMatchObject({ code: 'PROFILE_INCONSISTENT' });
     expect(await documents()).toEqual(before);
   });
+
+  it('PATCH: updates simple fields, preserves omitted avatar and creation date', async () => {
+    const first = await createUserProfile(identity('user-a'), { ...body(), avatarUrl: 'https://example.com/a.png' }, db);
+    const updated = await updateUserProfile(identity('user-a'), { nombre: ' Ana María ', apellido: 'García' }, db);
+    expect(updated.profile).toMatchObject({ nombre: 'Ana María', apellido: 'García', avatarUrl: first.data.profile.avatarUrl, createdAt: first.data.profile.createdAt });
+    expect(updated.profile.updatedAt).not.toBe(first.data.profile.updatedAt);
+    expect((await db.doc('usernames/ana-user1').get()).data()).toEqual({ uid: 'user-a', usernameKey: 'ana-user1' });
+    await updateUserProfile(identity('user-a'), { avatarUrl: null }, db);
+    expect((await db.doc('users/user-a').get()).data()?.avatarUrl).toBeNull();
+  });
+  it('PATCH: atomically renames and releases the old reservation', async () => {
+    await createUserProfile(identity('user-a'), body(), db);
+    const result = await updateUserProfile(identity('user-a'), { username: 'Ana-User2' }, db);
+    expect(result.profile).toMatchObject({ username: 'Ana-User2', usernameKey: 'ana-user2' });
+    expect((await db.doc('usernames/ana-user1').get()).exists).toBe(false);
+    expect((await db.doc('usernames/ana-user2').get()).data()).toEqual({ uid: 'user-a', usernameKey: 'ana-user2' });
+    expect((await documents()).usernames).toHaveLength(1);
+    await createUserProfile(identity('user-b'), body(), db);
+    expect((await db.doc('usernames/ana-user1').get()).data()?.uid).toBe('user-b');
+  });
+  it('PATCH: casing-only update retains the reservation document', async () => {
+    await createUserProfile(identity('user-a'), body(), db);
+    const before = await db.doc('usernames/ana-user1').get();
+    await updateUserProfile(identity('user-a'), { username: 'ANA-USER1' }, db);
+    const after = await db.doc('usernames/ana-user1').get();
+    expect(after.updateTime?.isEqual(before.updateTime!)).toBe(true);
+    expect((await db.doc('users/user-a').get()).data()?.username).toBe('ANA-USER1');
+    expect((await documents()).usernames).toHaveLength(1);
+  });
+  it('PATCH: occupied username preserves profile, dates and both reservations', async () => {
+    await createUserProfile(identity('user-a'), body(), db);
+    await createUserProfile(identity('user-b'), body('Other-User1'), db);
+    const before = await documents();
+    await expect(updateUserProfile(identity('user-a'), { username: 'OTHER-USER1', nombre: 'Nueva' }, db)).rejects.toMatchObject({ code: 'USERNAME_TAKEN' });
+    expect(await documents()).toEqual(before);
+  });
+  it('PATCH: normalized retry leaves document update times unchanged', async () => {
+    await createUserProfile(identity('user-a'), body(), db);
+    await updateUserProfile(identity('user-a'), { username: 'Ana-User2' }, db);
+    const before = await db.doc('users/user-a').get();
+    const reservation = await db.doc('usernames/ana-user2').get();
+    await updateUserProfile(identity('user-a'), { username: ' Ana-User2 ', nombre: ' Ana ', avatarUrl: null }, db);
+    const after = await db.doc('users/user-a').get();
+    expect(after.data()).toEqual(before.data());
+    expect(after.updateTime?.isEqual(before.updateTime!)).toBe(true);
+    expect((await db.doc('usernames/ana-user2').get()).updateTime?.isEqual(reservation.updateTime!)).toBe(true);
+  });
+  it('PATCH: concurrent independent fields on same UID do not lose changes', async () => {
+    await createUserProfile(identity('user-a'), body(), db);
+    await Promise.all([
+      updateUserProfile(identity('user-a'), { nombre: 'Ana María' }, db),
+      updateUserProfile(identity('user-a'), { apellido: 'García' }, db),
+    ]);
+    expect((await db.doc('users/user-a').get()).data()).toMatchObject({ nombre: 'Ana María', apellido: 'García' });
+    expect((await documents()).usernames).toHaveLength(1);
+  });
+  it('PATCH: simultaneous renames of same UID leave exactly its final reservation', async () => {
+    await createUserProfile(identity('user-a'), body(), db);
+    await Promise.all([
+      updateUserProfile(identity('user-a'), { username: 'Ana-User2' }, db),
+      updateUserProfile(identity('user-a'), { username: 'Ana-User3' }, db),
+    ]);
+    const user = (await db.doc('users/user-a').get()).data();
+    expect((await documents()).usernames).toEqual([{ id: user?.usernameKey, uid: 'user-a', usernameKey: user?.usernameKey }]);
+  });
+  it('PATCH: two UID compete for one new username with a single winner', async () => {
+    await createUserProfile(identity('user-a'), body(), db);
+    await createUserProfile(identity('user-b'), body('Other-User1'), db);
+    const results = await Promise.allSettled([
+      updateUserProfile(identity('user-a'), { username: 'Shared-User1' }, db),
+      updateUserProfile(identity('user-b'), { username: 'SHARED-USER1' }, db),
+    ]);
+    expect(failure(results)).toMatchObject({ code: 'USERNAME_TAKEN' });
+    const users = await db.collection('users').get();
+    expect((await documents()).usernames).toHaveLength(2);
+    for (const user of users.docs) {
+      expect((await db.doc(`usernames/${user.data().usernameKey}`).get()).data()?.uid).toBe(user.id);
+    }
+  });
+  it('PATCH: renaming while another UID claims the old key preserves ownership', async () => {
+    await createUserProfile(identity('user-a'), body(), db);
+    const results = await Promise.allSettled([
+      updateUserProfile(identity('user-a'), { username: 'Ana-User2' }, db),
+      createUserProfile(identity('user-b'), body(), db),
+    ]);
+    expect(results[0].status).toBe('fulfilled');
+    if (results[1].status === 'rejected') {
+      expect(results[1].reason).toMatchObject({ code: 'USERNAME_TAKEN' });
+      await createUserProfile(identity('user-b'), body(), db);
+    }
+    expect((await db.doc('usernames/ana-user1').get()).data()?.uid).toBe('user-b');
+    expect((await db.doc('usernames/ana-user2').get()).data()?.uid).toBe('user-a');
+    expect((await documents()).usernames).toHaveLength(2);
+  });
+  it('PATCH: inconsistent current reservation is never repaired implicitly', async () => {
+    await createUserProfile(identity('user-a'), body(), db);
+    await db.doc('usernames/ana-user1').update({ uid: 'other' });
+    const before = await documents();
+    await expect(updateUserProfile(identity('user-a'), { nombre: 'Nueva' }, db)).rejects.toMatchObject({ code: 'PROFILE_INCONSISTENT' });
+    expect(await documents()).toEqual(before);
+  });
+  it('PATCH atomicity: real SDK commit failure rolls back update and reservation deletion', async () => {
+    await createUserProfile(identity('user-a'), body(), db);
+    await createUserProfile(identity('user-b'), body('Other-User1'), db);
+    const before = await documents();
+    await expect(db.runTransaction(async (tx) => {
+      tx.update(db.doc('users/user-a'), { username: 'Other-User1', usernameKey: 'other-user1' });
+      tx.delete(db.doc('usernames/ana-user1'));
+      tx.create(db.doc('usernames/other-user1'), { uid: 'user-a', usernameKey: 'other-user1' });
+    }, { maxAttempts: 1 })).rejects.toMatchObject({ code: 6 });
+    expect(await documents()).toEqual(before);
+  });
+
 });

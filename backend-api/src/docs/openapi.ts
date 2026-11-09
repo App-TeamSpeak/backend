@@ -1,3 +1,10 @@
+const userInputProperties = {
+          nombre: { type: 'string', description: 'Se recortan espacios exteriores. El valor recortado debe tener 1–100 caracteres y no estar vacío.' },
+          apellido: { type: 'string', description: 'Se recortan espacios exteriores; el valor resultante debe tener 1–100 caracteres y no estar vacío.' },
+          username: { type: 'string', pattern: '^\\s*[A-Za-z0-9_-]{8,30}\\s*$', description: 'Se recortan espacios exteriores; letras ASCII, números, - y _. Conserva mayúsculas para mostrar; unicidad sin distinguir mayúsculas mediante usernameKey.' },
+          avatarUrl: { type: 'string', nullable: true, description: 'URL HTTPS válida después de recortar espacios exteriores, máximo 2048 caracteres normalizados.' },
+        } as const;
+
 const userProfileSchema = {
         type: 'object', required: ['uid', 'email', 'nombre', 'apellido', 'username', 'usernameKey', 'avatarUrl', 'profileStatus', 'createdAt', 'updatedAt'],
         properties: {
@@ -42,13 +49,9 @@ export const openapi = {
       },
       UserInput: {
         type: 'object', additionalProperties: false, required: ['nombre', 'apellido', 'username'],
-        properties: {
-          nombre: { type: 'string', description: 'Se recortan espacios exteriores. El valor recortado debe tener 1–100 caracteres y no estar vacío.' },
-          apellido: { type: 'string', description: 'Se recortan espacios exteriores; el valor resultante debe tener 1–100 caracteres y no estar vacío.' },
-          username: { type: 'string', pattern: '^\\s*[A-Za-z0-9_-]{8,30}\\s*$', description: 'Se recortan espacios exteriores; letras ASCII, números, - y _. Conserva mayúsculas para mostrar; unicidad sin distinguir mayúsculas mediante usernameKey.' },
-          avatarUrl: { type: 'string', nullable: true, description: 'URL HTTPS válida después de recortar espacios exteriores, máximo 2048 caracteres normalizados. Omitido se almacena como null.' },
-        },
+        properties: userInputProperties,
       },
+      UserPatch: { type: 'object', additionalProperties: false, minProperties: 1, properties: userInputProperties },
       UserProfile: userProfileSchema,
       UserResponse: {
         type: 'object', required: ['success', 'data'],
@@ -126,7 +129,7 @@ export const openapi = {
       },
       post: {
         tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Crea el perfil y reserva el username atómicamente',
-        description: 'UID y email proceden del token Firebase. Reintentos con los mismos datos normalizados devuelven 200 sin escrituras. Completa perfiles recuperables sin reemplazar campos existentes; responde 200 en recuperación. No actualiza perfiles completos. Cache-Control: no-store.',
+        description: 'UID y email proceden del token Firebase. Si avatarUrl se omite al crear el perfil, se almacena null. Reintentos con los mismos datos normalizados devuelven 200 sin escrituras. Completa perfiles recuperables sin reemplazar campos existentes; responde 200 en recuperación. No actualiza perfiles completos. Cache-Control: no-store.',
         requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/UserInput' } } } },
         responses: {
           201: { description: 'Perfil creado', content: { 'application/json': { schema: { $ref: '#/components/schemas/UserResponse' } } } },
@@ -139,11 +142,27 @@ export const openapi = {
         },
       },
       patch: {
-        tags: ['Users'],
-        security: [{ bearerAuth: [] }],
-        summary: 'Actualiza el perfil autenticado',
-        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' } } } },
-        responses: { 501: { description: 'Ruta preparada; persistencia pendiente' }, 401: { description: 'No autenticado' } },
+        tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Actualiza parcialmente el perfil autenticado',
+        description: 'Solo nombre, apellido, username y avatarUrl. Campos omitidos se conservan; omitir avatarUrl conserva el avatar actual y avatarUrl null lo elimina. El cambio de username mueve la reserva atómicamente. Mayúsculas solo cambian presentación. Valores equivalentes tras normalizar no generan escrituras ni cambian updatedAt. Requiere perfil completo y reserva consistente. Cache-Control: no-store.',
+        requestBody: {
+          required: true, content: { 'application/json': {
+            schema: { $ref: '#/components/schemas/UserPatch' },
+            examples: {
+              nombre: { value: { nombre: 'Ana María' } },
+              varios: { value: { nombre: 'Ana María', apellido: 'Pérez', username: 'Ana-User2', avatarUrl: null } },
+              quitarAvatar: { value: { avatarUrl: null } },
+            },
+          } },
+        },
+        responses: {
+          200: { description: 'Perfil actualizado o repetición sin cambios', content: { 'application/json': { schema: { $ref: '#/components/schemas/UserResponse' } } } },
+          400: { description: 'VALIDATION_ERROR o INVALID_JSON', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: 'AUTH_REQUIRED o AUTH_INVALID', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          404: { description: 'PROFILE_NOT_FOUND: completar registro mediante POST', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          409: { description: 'USERNAME_TAKEN, PROFILE_INCOMPLETE o PROFILE_INCONSISTENT', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          500: { description: 'INTERNAL_ERROR', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          503: { description: 'AUTH_UNAVAILABLE o FIRESTORE_UNAVAILABLE', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
       },
       delete: {
         tags: ['Users'],

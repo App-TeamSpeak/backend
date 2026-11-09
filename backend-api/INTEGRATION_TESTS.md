@@ -69,7 +69,7 @@ Los archivos de integración quedan fuera de la cobertura unitaria.
 El emulador permite comprobar persistencia y concurrencia locales. No acredita
 IAM, latencia, cuotas, índices ni todos los comportamientos de producción.
 No se prueba Firebase Authentication: las identidades del servicio son datos
-controlados. PATCH y DELETE permanecen fuera de esta etapa.
+controlados. DELETE permanece fuera de esta etapa.
 
 ## Puerto configurable y Node 24
 
@@ -129,3 +129,32 @@ PATH=/tmp/teamspeak-integration-tools/jre21/bin:$PATH \
 TEAMSPEAK_FIREBASE_CLI=/tmp/teamspeak-integration-tools/cli/node_modules/.bin/firebase \
 npm run test:integration
 ```
+
+
+## TS-01: actualización parcial (PATCH)
+
+La suite también ejecuta PATCH a través de `updateUserProfile` con Firestore real
+local: campos simples, avatar nulo y omitido, cambio de username y liberación de
+su reserva, cambio de mayúsculas sin reescribir la reserva, conflicto sin cambios,
+repetición con `updateTime` intacto y reserva actual inconsistente.
+
+Concurrencia: campos independientes del mismo UID, dos cambios de username del
+mismo UID, dos UID disputando una nueva clave, y renombrar mientras otro UID
+intenta reservar la clave anterior. Se comprueba la propiedad de las reservas y
+la ausencia de huérfanos en el estado final.
+
+El caso de rollback de actualización usa una transacción SDK real con update,
+delete y create; un create sobre una reserva existente falla en el commit y se
+comprueba que ni el perfil ni las reservas cambian. Se distingue de la prueba de
+conflicto del servicio, que rechaza antes de escribir.
+
+Contrato: PATCH no crea perfiles (404 PROFILE_NOT_FOUND), no recupera perfiles
+incompletos (409 PROFILE_INCOMPLETE; usar POST) y rechaza inconsistencias con
+409 PROFILE_INCONSISTENT. Los campos internos no son editables. Las actualizaciones
+sin cambios reales conservan updatedAt y no escriben documentos.
+
+Resultado de PATCH (Node 24.18.0, 9 de noviembre de 2026): 158/158 pruebas
+unitarias/HTTP y 22/22 de integración real aprobadas (103 y 11 anteriores
+conservadas). Lint y build correctos. Cobertura unitaria: instrucciones/líneas
+95,74 %, ramas 90,90 %, funciones 70 %. Integración ejecutada en 8081 con
+semilla 42; emulador detenido automáticamente al finalizar.

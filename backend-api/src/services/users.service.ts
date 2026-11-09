@@ -2,7 +2,7 @@ import { Timestamp, type Firestore } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import { getFirestoreDb } from '../config/firebase';
 import { AppError } from '../middleware/errors';
-import { userBodySchema, type UserBody } from '../validators/user.validator';
+import { userBodySchema, userPatchSchema, type UserPatch, type UserBody } from '../validators/user.validator';
 import { getFirestoreCollections } from './firestore.service';
 import type { UserDocument } from './firestore.documents';
 
@@ -110,6 +110,51 @@ export async function createUserProfile(identity: UserIdentity, input: UserBody,
       if (profileSnapshot.exists) transaction.set(profileRef, profile, { merge: true });
       else transaction.create(profileRef, profile);
       return { created: !profileSnapshot.exists, data: { uid: identity.uid, profileStatus: 'complete' as const, profile: serialize(profile) } };
+    });
+  }, db);
+}
+
+
+export async function updateUserProfile(identity: UserIdentity, input: UserPatch, db?: Firestore) {
+  const patch = userPatchSchema.parse(input);
+  return withFirestore(async (firestore) => {
+    const { users, usernames } = getFirestoreCollections(firestore);
+    const profileRef = users.doc(identity.uid);
+    return firestore.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(profileRef);
+      if (!snapshot.exists) throw new AppError(404, 'PROFILE_NOT_FOUND', 'Completa el registro mediante POST /api/users/me.');
+      const profile = inspectProfile(snapshot.data(), identity.uid).complete;
+      if (!profile) throw new AppError(409, 'PROFILE_INCOMPLETE', 'Completa el perfil mediante POST /api/users/me.');
+      const oldRef = usernames.doc(profile.usernameKey);
+      const oldReservation = await transaction.get(oldRef);
+      if (!oldReservation.exists || oldReservation.data()?.uid !== identity.uid
+        || oldReservation.data()?.usernameKey !== profile.usernameKey) return inconsistent();
+      const usernameKey = (patch.username ?? profile.username).toLowerCase();
+      const keyChanged = usernameKey !== profile.usernameKey;
+      const newRef = usernames.doc(usernameKey);
+      if (keyChanged) {
+        const newReservation = await transaction.get(newRef);
+        if (newReservation.exists) {
+          const reservation = newReservation.data();
+          if (!reservation || reservation.usernameKey !== usernameKey || typeof reservation.uid !== 'string' || !reservation.uid) return inconsistent();
+          if (reservation.uid === identity.uid) return inconsistent();
+          throw new AppError(409, 'USERNAME_TAKEN', 'El username no está disponible.');
+        }
+      }
+      const changes: UserPatch = {};
+      for (const field of ['nombre', 'apellido', 'username', 'avatarUrl'] as const) {
+        const value = patch[field];
+        if (value !== undefined && value !== profile[field]) Object.assign(changes, { [field]: value });
+      }
+      if (!Object.keys(changes).length) {
+        return { uid: identity.uid, profileStatus: 'complete' as const, profile: serialize(profile) };
+      }
+      const updatedAt = Timestamp.now();
+      // All reads precede writes, including the target reservation when renaming.
+      if (keyChanged) transaction.create(newRef, { uid: identity.uid, usernameKey });
+      transaction.update(profileRef, { ...changes, ...(keyChanged ? { usernameKey } : {}), updatedAt });
+      if (keyChanged) transaction.delete(oldRef);
+      return { uid: identity.uid, profileStatus: 'complete' as const, profile: serialize({ ...profile, ...changes, usernameKey, updatedAt }) };
     });
   }, db);
 }
