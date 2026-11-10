@@ -35,6 +35,7 @@ it('retained verification reference rejects a removed emulator host before any n
 it.each([
   ['FIREBASE_AUTH_EMULATOR_HOST', '127.0.0.1:9100'],
   ['FIREBASE_PROJECT_ID', 'fixture-wrong-project'],
+  ['FIRESTORE_EMULATOR_HOST', '127.0.0.1:8082'],
   ['TEAMSPEAK_ENABLE_REALTIME_EMULATOR_TESTS', 'false'],
 ])('retained verification revalidates changed %s at call time', async (key, value) => {
   const retained = (await load()).verifyFirebaseIdToken; vi.stubEnv(key, value);
@@ -50,4 +51,13 @@ it('initialization and diagnostics expose no raw Auth, App or credential referen
   const info = f.getFirebaseInfo(); expect(info).toEqual({ appName: 'teamspeak-realtime', projectId: project });
   expect(Object.keys(info).sort()).toEqual(['appName', 'projectId']); expect(Object.isFrozen(info)).toBe(true);
   expect(f).not.toHaveProperty('getFirebaseAuth'); expect(f).not.toHaveProperty('application'); expect(networkAttempt).not.toHaveBeenCalled();
+});
+
+it('a retained marker read operation cannot bypass configuration or closure checks', async () => {
+  const f = await load(); const read = f.hasAccountDeletion;
+  vi.stubEnv('FIRESTORE_EMULATOR_HOST', '127.0.0.1:8082');
+  await expect(read('fixture')).rejects.toMatchObject({ code: 'FIREBASE_CONFIGURATION_CHANGED' });
+  await f.closeFirebase();
+  await expect(read('fixture')).rejects.toMatchObject({ code: 'FIREBASE_CLIENTS_CLOSED' });
+  expect(networkAttempt).not.toHaveBeenCalled();
 });

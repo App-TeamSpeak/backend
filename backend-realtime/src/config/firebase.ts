@@ -83,9 +83,12 @@ function getFirebaseAuth(): Auth {
   catch { return reject('FIREBASE_INITIALIZATION_FAILED'); }
 }
 // No raw Auth or App references cross this module's operational boundary.
-export async function verifyFirebaseIdToken(token: string): Promise<DecodedIdToken> {
+export async function verifyFirebaseIdToken(token: string, checkRevoked?: boolean): Promise<DecodedIdToken> {
   // Keep validation and SDK invocation synchronous: no await between these calls.
-  return getFirebaseAuth().verifyIdToken(token);
+  const client = getFirebaseAuth();
+  const identity = await (checkRevoked === undefined ? client.verifyIdToken(token) : client.verifyIdToken(token, checkRevoked));
+  configuration();
+  return identity;
 }
 export function getFirebaseInfo(): Readonly<{ appName: string; projectId: string | undefined }> {
   const app = application();
@@ -101,6 +104,15 @@ export function getFirestoreDb(): Firestore {
       : getFirestore(app);
   } catch { return reject('FIREBASE_INITIALIZATION_FAILED'); }
 }
+
+// Narrow read operation: no retained Firestore handle in authorization services.
+export async function hasAccountDeletion(uid: string): Promise<boolean> {
+  if (!uid || uid.length > 128 || uid.includes('/')) throw new Error('INVALID_UID');
+  const snapshot = await getFirestoreDb().collection('accountDeletions').doc(uid).get();
+  configuration(); // Do not authorize a read completed after configuration changed or closure.
+  return snapshot.exists;
+}
+
 export async function initializeFirebase(): Promise<void> {
   try { getFirebaseAuth(); getFirestoreDb(); }
   catch (error) {

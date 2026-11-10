@@ -11,3 +11,9 @@ it('propagates verification failure to the existing Socket.IO middleware', async
   const error = new Error('controlled failure'); mocks.verifyFirebaseIdToken.mockRejectedValue(error);
   await expect(verifyToken('fixture-token')).rejects.toBe(error);
 });
+
+it('forwards an explicit revocation check without exposing Auth', async () => {
+  mocks.verifyFirebaseIdToken.mockResolvedValue({ uid: 'fixture-user' });
+  expect(await verifyToken('fixture-token', true)).toEqual({ uid: 'fixture-user' });
+  expect(mocks.verifyFirebaseIdToken).toHaveBeenCalledExactlyOnceWith('fixture-token', true);
+});

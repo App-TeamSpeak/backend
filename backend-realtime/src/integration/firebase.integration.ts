@@ -1,3 +1,5 @@
+import { createServer, type Server as HttpServer } from 'node:http';
+import { TestSocketClient } from './socket-client';
 import http from 'node:http';
 import https from 'node:https';
 import http2 from 'node:http2';
@@ -5,6 +7,10 @@ import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { deleteApp, getApps, initializeApp, type App } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 let fixtureApp: App | undefined;
+let transport: import('socket.io').Server | undefined;
+let httpServer: HttpServer | undefined;
+let socketOrigin: string;
+let socketClients: TestSocketClient[] = [];
 const project = 'demo-teamspeak-tests';
 const firestoreOrigin = `http://${process.env.FIRESTORE_EMULATOR_HOST}`;
 const authOrigin = `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}`;
@@ -25,7 +31,12 @@ beforeEach(async () => {
   fixtureApp = initializeApp({ projectId: project, credential: { getAccessToken: async () => ({ access_token: 'owner', expires_in: 3600 }) } }, 'rt-identity-fixtures');
 });
 afterEach(async () => {
-  try { await firebase?.closeFirebase(); }
+  try {
+    await Promise.all(socketClients.map((client) => client.close())); socketClients = [];
+    if (transport) await new Promise<void>((resolve) => transport!.close(() => resolve()));
+    transport = undefined; httpServer = undefined;
+    await firebase?.closeFirebase();
+  }
   finally { if (fixtureApp) { await deleteApp(fixtureApp); fixtureApp = undefined; } }
 });
 it('builds stable owned clients for the exact demo project', () => {
@@ -76,4 +87,71 @@ it('blocks remote test transports locally before transmission', () => {
   expect(() => http.request('http://www.googleapis.com/')).toThrow('REMOTE_TEST_NETWORK_BLOCKED');
   expect(() => http2.connect('https://www.googleapis.com')).toThrow('REMOTE_TEST_NETWORK_BLOCKED');
   expect(() => fetch('https://www.googleapis.com/')).toThrow('REMOTE_TEST_NETWORK_BLOCKED');
+});
+
+async function fixtureToken(uid: string): Promise<string> {
+  const email = `${uid}@example.com`;
+  await getAuth(fixtureApp!).createUser({ uid, email, password: 'Emulator-Only1!' });
+  const response = await fetch(`${authOrigin}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=emulator-only`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password: 'Emulator-Only1!', returnSecureToken: true }), signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) throw new Error('Unable to sign in local fixture');
+  return (await response.json() as { idToken: string }).idToken;
+}
+async function startTransport() {
+  const { createRealtimeServer } = await import('../realtime/socket.js');
+  httpServer = createServer(); transport = createRealtimeServer(httpServer);
+  await new Promise<void>((resolve) => httpServer!.listen(0, '127.0.0.1', resolve));
+  socketOrigin = `http://127.0.0.1:${(httpServer.address() as { port: number }).port}`;
+}
+function socketClient(token: string) {
+  const client = new TestSocketClient(socketOrigin, { token, uid: 'forged' });
+  socketClients.push(client); return client;
+}
+it('authorizes real Socket.IO events for an active fixture and isolates another user', async () => {
+  const firstToken = await fixtureToken('rt-first'); const secondToken = await fixtureToken('rt-second');
+  await startTransport();
+  const first = socketClient(firstToken); const second = socketClient(secondToken);
+  await Promise.all([first.wait('connect'), second.wait('connect')]);
+  await first.request('room:join', { roomId: 'room' }); await second.request('room:join', { roomId: 'room' });
+  await first.request('chat:send', { text: 'fixture', uid: 'forged' });
+  expect(await second.wait('chat:message')).toMatchObject({ authorId: 'rt-first', text: 'fixture' });
+  await firebase.getFirestoreDb().doc('accountDeletions/rt-first').create({ status: 'pending' });
+  expect(await first.request('chat:send', { text: 'forbidden' })).toMatchObject({ ok: false, error: { code: 'ACCOUNT_UNAVAILABLE' } });
+  await first.wait('disconnect');
+  expect(await second.request('chat:send', { text: 'second still active' })).toEqual({ ok: true });
+  expect(await socketClient(firstToken).wait('connect_error')).toMatchObject({ message: 'ACCOUNT_UNAVAILABLE' });
+  expect((await firebase.getFirestoreDb().doc('accountDeletions/rt-second').get()).exists).toBe(false);
+  expect(second.received.filter(([event, data]) => event === 'chat:message' && (data as { text: string }).text === 'forbidden')).toEqual([]);
+});
+it.each([{ status: 'pending' }, { status: 'blocked' }, { status: 'completed' }, {}, { status: 'unknown' }])('denies an existing marker regardless of its contents: %j', async (marker) => {
+  const token = await fixtureToken('rt-marker');
+  await firebase.getFirestoreDb().doc('accountDeletions/rt-marker').create(marker);
+  await startTransport();
+  expect(await socketClient(token).wait('connect_error')).toMatchObject({ message: 'ACCOUNT_UNAVAILABLE' });
+  expect(transport!.sockets.sockets.size).toBe(0);
+});
+it('rejects a revoked real emulator token on a new connection', async () => {
+  const token = await fixtureToken('rt-revoked');
+  // Admin compares second-resolution auth_time strictly against tokensValidAfterTime.
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  await getAuth(fixtureApp!).revokeRefreshTokens('rt-revoked'); await startTransport();
+  expect(await socketClient(token).wait('connect_error')).toMatchObject({ message: 'AUTH_INVALID' });
+});
+it.each(['disabled', 'deleted'])('rejects %s Authentication identities on a real handshake', async (state) => {
+  const token = await fixtureToken('rt-auth');
+  if (state === 'disabled') await getAuth(fixtureApp!).updateUser('rt-auth', { disabled: true });
+  else await getAuth(fixtureApp!).deleteUser('rt-auth');
+  await startTransport();
+  expect(await socketClient(token).wait('connect_error')).toMatchObject({ message: 'AUTH_INVALID' });
+});
+it('fails closed with a controlled error after Firebase configuration becomes stale', async () => {
+  const token = await fixtureToken('rt-stale'); await startTransport();
+  const client = socketClient(token); await client.wait('connect');
+  const previous = process.env.FIRESTORE_EMULATOR_HOST;
+  process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:65534';
+  try { expect(await client.request('room:join', { roomId: 'forbidden' })).toMatchObject({ ok: false, error: { code: 'AUTHORIZATION_UNAVAILABLE' } }); }
+  finally { process.env.FIRESTORE_EMULATOR_HOST = previous; }
+  expect(transport!.sockets.adapter.rooms.has('forbidden')).toBe(false);
 });

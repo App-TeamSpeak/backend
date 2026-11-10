@@ -201,3 +201,147 @@ unitarios y dos de integración. Cobertura global: 71,26 % instrucciones/líneas
 94,16 % ramas y 89,47 % funciones. firebase.ts: 100 % instrucciones/líneas,
 97,16 % ramas y 92,85 % funciones. La suite real comprobó el bloqueo local
 de los cuatro transportes y finalizó con el cierre de ambos emuladores.
+
+## TS-01.4D.2: autorización de conexiones y eventos
+
+El handshake exige un token y llama a verifyToken(token, true). La operación
+encapsulada verifica el ID token y su revocación, consulta la identidad mediante
+Admin y rechaza usuarios eliminados/deshabilitados cuando Firebase lo detecta.
+El UID procede exclusivamente del token verificado. Antes de aceptar la conexión
+se consulta accountDeletions/{uid}. Toda existencia bloquea: pending, blocked,
+completed, estado desconocido o documento malformado. Nunca se recrea permiso
+por interpretar el contenido. No se escribe en esa colección.
+
+Los ocho eventos room:join, room:leave, chat:send, webrtc:offer, webrtc:answer,
+webrtc:ice-candidate, media:state y screen:state comparten el mismo wrapper.
+Cada evento vuelve a consultar el marcador con el UID de socket.data.user, sin
+caché de ausencia. El servicio usa una lectura acotada de la infraestructura
+Firebase propia, revalidando configuración antes y después de la lectura; no
+conserva clientes suministrados por el llamador. Auth continúa siendo privado.
+La operación de verificación revalida también al finalizar.
+
+La espera de Authentication y la lectura Firestore tienen un límite de 5 segundos
+cada una. Ante error o timeout no se acepta la conexión ni se ejecuta el evento.
+El timeout no cancela la solicitud SDK subyacente; una respuesta tardía no ejecuta
+el handler y su rechazo queda gestionado. El handshake completo puede esperar
+hasta aproximadamente 10 segundos (dos fases). Los errores no incluyen mensajes
+internos, tokens ni contenido del marcador.
+
+| Código | Significado |
+| --- | --- |
+| AUTH_REQUIRED | Token ausente |
+| AUTH_INVALID | Token inválido/revocado o identidad eliminada/deshabilitada |
+| ACCOUNT_UNAVAILABLE | Existe un marcador de eliminación |
+| AUTHORIZATION_UNAVAILABLE | No se pudo comprobar autorización, timeout o configuración insegura |
+| ROOM_ID_REQUIRED | Payload de entrada a sala inválido |
+| MESSAGE_INVALID | Mensaje inválido, vacío, mayor de 2000 caracteres o sin sala |
+| EVENT_FAILED | Error interno al ejecutar un handler |
+
+El rechazo del handshake conserva message con el código y añade data.code.
+Los eventos rechazados emiten error:message con {code, message}. Si el cliente
+suministra un acknowledgement, recibe {ok:false,error:{code,message}}; los eventos
+válidos responden {ok:true}. No es obligatorio enviar acknowledgements y se
+conservan los eventos existentes de respuesta/broadcast.
+
+Detectar un marcador bloquea localmente la sesión y desconecta ese socket.
+Los guards comprueban de nuevo ese bloqueo y la conexión tras la autorización y
+tras esperas de las transiciones de sala, antes de nuevos efectos. Una detección
+concurrente impide que otro evento pendiente continúe. Un fallo transitorio de
+Firestore deniega el evento actual; el siguiente intenta autorizar nuevamente.
+La limpieza interna al desconectarse nunca requiere una lectura Firestore.
+
+Hay una sola sala de aplicación activa por socket. Cambiar de sala abandona la
+anterior, mantiene roomId consistente y serializa transiciones para adaptadores
+asíncronos. Repetir la misma sala no duplica la notificación de participante.
+Payloads de sala y chat nulos, arrays, tipos incorrectos o campos no string se
+rechazan sin destructuración insegura. Los payloads de señalización siguen
+siendo opacos y no se añaden funciones ni contratos WebRTC.
+
+No hay atomicidad entre la lectura Firestore y una emisión. Un evento autorizado
+puede competir con la creación posterior del marcador. Sin un nuevo evento no
+se detecta el bloqueo de un socket inactivo: onSnapshot, registro por UID y
+desconexión proactiva quedan para TS-01.4D.3. Esta etapa no retira automáticamente
+al usuario de todas sus sesiones ni comprueba revocación en cada evento.
+
+Coste: aproximadamente una lectura de marcador por intento de conexión y una
+por evento protegido, además de la comprobación Auth con revocación por conexión.
+ICE puede producir muchas lecturas (N candidatos implican aproximadamente N
+lecturas). No se añadió caché negativa, Redis ni otra infraestructura.
+
+Las pruebas de socket usan WebSocket nativo de Node 24 y un cliente mínimo de
+Engine.IO v4/Socket.IO para el namespace predeterminado, solo en tests.
+No se necesita instalar socket.io-client. Se comprueba el transporte WebSocket
+real; no se cubren polling, upgrade, reconexión automática del cliente oficial
+ni adaptadores distribuidos. La reconexión se prueba creando una conexión nueva.
+Las unitarias de guards usan servicios simulados; las integraciones conservan
+los nueve casos anteriores y añaden conexiones reales a Authentication/Firestore
+Emulator, marcadores de todos los tipos, revocación, aislamiento entre usuarios
+y rechazo tras el handshake. Solo se conectan sockets a 127.0.0.1. Se utiliza el
+mismo launcher y comandos documentados arriba, sin credenciales reales.
+
+DELETE y el conciliador de backend-api permanecen sin cambios y sin habilitación
+pública. Las limitaciones operacionales de configuración inmutable, IAM y
+verificación del proyecto compartido documentadas en TS-01.4D.1 siguen vigentes.
+
+Resultado TS-01.4D.2 con Node 24.18.0/npm 11.16.0: lint, typecheck y build
+correctos; 111 pruebas unitarias/HTTP/transporte con servicios simulados y 19
+integraciones con ambos emuladores aprobadas: 130 en total. Se conservan los
+63 casos anteriores; se añaden 57 casos en la suite unitaria y 10 integraciones.
+Cobertura global: 96,68 % instrucciones/líneas, 93,05 % ramas y 93,54 % funciones.
+Firebase y socket.ts alcanzan el 100 % de instrucciones/líneas; sus coberturas de
+ramas son 96,42 % y 90,41 %, respectivamente. Los puertos de los emuladores
+quedaron libres al finalizar. La regresión de host Firestore conservado también
+está cubierta; la restauración global de transportes del setup sigue pendiente.
+
+### Corrección P2: admisión acotada de eventos
+
+Cada socket admite como máximo dos eventos protegidos en vuelo
+(MAX_IN_FLIGHT_AUTHORIZATIONS_PER_SOCKET). La admisión es síncrona y común a
+los ocho eventos, antes de iniciar Firestore. El exceso recibe AUTHORIZATION_BUSY
+por error:message y por su acknowledgement, si lo suministró. No inicia lecturas,
+no ejecuta handlers y no se encola para ejecución posterior. Una ráfaga puntual
+no provoca desconexión; el cliente decide si reintenta después.
+
+startAccountAuthorization separa authorized (resultado limitado a cinco segundos)
+de settled (finalización real de la lectura SDK, sin rechazo). Un timeout no
+libera la posición mientras la lectura siga pendiente. La posición se libera
+una sola vez cuando terminaron tanto la lectura como el evento/handler. Esto
+también acota las transiciones de sala con adaptadores lentos. Las respuestas
+tardías no reanudan handlers cuyo plazo expiró.
+
+Cada instancia de createRealtimeServer tiene además un presupuesto compartido
+de 64 eventos en vuelo (MAX_IN_FLIGHT_EVENT_AUTHORIZATIONS_PER_SERVER). Evita
+eludir el límite individual acumulando sockets o sustituyendo conexiones con
+lecturas atascadas. Las lecturas de sockets desconectados siguen contabilizadas
+hasta terminar; no se mantienen registros por UID ni colas. La limpieza de salas
+y desconexión no pasa por la admisión. Al agotarse el presupuesto compartido,
+otros sockets reciben AUTHORIZATION_BUSY sin consultar Firestore.
+
+No se afirma cancelación del SDK. Si las 64 lecturas quedan atascadas, los eventos
+nuevos fallan cerrados hasta su finalización o hasta que se cierre el cliente SDK
+durante el ciclo de vida del servicio. Es un límite de eventos por instancia,
+no un rate limiter, una cuota distribuida ni una defensa general frente a
+inundaciones de conexiones/handshakes o tráfico de red. El handshake conserva
+su comportamiento previo y no consume este presupuesto de eventos. Dos sockets
+mantienen presupuestos individuales independientes mientras exista capacidad
+compartida. Una carga legítima intensa de ICE puede requerir reintentos y recibirá
+rechazos explícitos en vez de una cola creciente.
+
+Las regresiones usan consultas controladas y transporte WebSocket real:
+ráfaga de 1000 eventos (dos lecturas admitidas y 998 rechazos con acknowledgement),
+todos los eventos, liberación normal/error, timeout con lectura aún activa,
+resultados tardíos y presupuesto compartido persistente tras desconexiones.
+Los relojes del servicio comprueban el plazo exacto sin esperar cinco segundos;
+la prueba de transporte acelera exclusivamente ese temporizador.
+
+Permanecen como mejoras P3 el diagnóstico más preciso de errores de infraestructura
+Authentication y la sincronización de aserciones negativas anteriores de
+broadcasts. Las nuevas pruebas de ráfagas sí usan una barrera del observador.
+
+Verificación de la corrección P2 con Node 24.18.0/npm 11.16.0: lint, typecheck y
+build correctos; 119 pruebas unitarias/HTTP/transporte y 19 integraciones con
+Authentication/Firestore Emulator aprobadas (138 en total). Se conservan las
+130 anteriores y se añaden ocho regresiones. Cobertura global: 96,93 % de
+instrucciones/líneas, 93,50 % de ramas y 93,93 % de funciones. socket.ts mantiene
+100 % de instrucciones/líneas y alcanza 91,46 % de ramas. Los emuladores se
+cerraron al finalizar.

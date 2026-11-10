@@ -60,3 +60,29 @@ it('verifies with the private owned SDK client and preserves the default revocat
   const f = await load(); expect(await f.verifyFirebaseIdToken('fixture-token')).toEqual({ uid: 'fixture-user' });
   expect(verify).toHaveBeenCalledExactlyOnceWith('fixture-token'); await f.closeFirebase();
 });
+
+it('passes the explicit revocation option to the private client', async () => {
+  const verify = vi.fn().mockResolvedValue({ uid: 'fixture-user' }); sdk.getAuth.mockReturnValue({ verifyIdToken: verify });
+  const f = await load(); await f.verifyFirebaseIdToken('fixture-token', true);
+  expect(verify).toHaveBeenCalledExactlyOnceWith('fixture-token', true); await f.closeFirebase();
+});
+it('rejects an authentication result completed after configuration changed', async () => {
+  let complete!: (value: { uid: string }) => void;
+  sdk.getAuth.mockReturnValue({ verifyIdToken: vi.fn(() => new Promise((resolve) => { complete = resolve; })) });
+  const f = await load(); const verification = f.verifyFirebaseIdToken('fixture-token', true);
+  vi.stubEnv('FIRESTORE_EMULATOR_HOST', '127.0.0.1:8082'); complete({ uid: 'fixture' });
+  await expect(verification).rejects.toMatchObject({ code: 'FIREBASE_CONFIGURATION_CHANGED' });
+  await f.closeFirebase();
+});
+it('reads only marker existence and rejects a read completed after closure', async () => {
+  const get = vi.fn().mockResolvedValue({ exists: true, data: () => { throw new Error('Must not read content'); } });
+  const doc = vi.fn(() => ({ get })); const collection = vi.fn(() => ({ doc }));
+  sdk.Firestore.mockImplementation(function () { return { terminate: sdk.terminate, collection }; });
+  const f = await load(); expect(await f.hasAccountDeletion('fixture')).toBe(true);
+  expect(collection).toHaveBeenCalledExactlyOnceWith('accountDeletions'); expect(doc).toHaveBeenCalledExactlyOnceWith('fixture');
+  get.mockResolvedValueOnce({ exists: false }); expect(await f.hasAccountDeletion('fixture')).toBe(false);
+  let complete!: (value: { exists: boolean }) => void;
+  get.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+  const reading = f.hasAccountDeletion('fixture'); await f.closeFirebase(); complete({ exists: false });
+  await expect(reading).rejects.toMatchObject({ code: 'FIREBASE_CLIENTS_CLOSED' });
+});
