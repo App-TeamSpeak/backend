@@ -1,17 +1,18 @@
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { deleteApp, initializeApp } from 'firebase-admin/app';
-import { getAuth } from 'firebase-admin/auth';
-import { getFirestore, Timestamp } from 'firebase-admin/firestore';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { deleteApp } from 'firebase-admin/app';
+import { getFirebaseAuth, getFirestoreDb } from '../config/firebase';
+import { Timestamp } from 'firebase-admin/firestore';
 import { app } from '../app';
 import { createUserProfile, updateUserProfile } from '../services/users.service';
+import { createAccountDeletionReconciler } from '../services/account-deletion.reconciler';
 import { processAccountDeletion } from '../services/account-deletion.processor';
 import { userBodySchema } from '../validators/user.validator';
 
 const project = 'demo-teamspeak-tests';
-const firebase = initializeApp({ projectId: project }, 'deletion-integration');
-const auth = getAuth(firebase);
-const db = getFirestore(firebase);
+const auth = getFirebaseAuth();
+const firebase = auth.app;
+const db = getFirestoreDb();
 const firestoreOrigin = `http://${process.env.FIRESTORE_EMULATOR_HOST}`;
 const authOrigin = `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}`;
 const body = userBodySchema.parse({ nombre: 'Ana', apellido: 'Pérez', username: 'Ana-User1' });
@@ -248,6 +249,82 @@ describe('DELETE intent with real Authentication and Firestore emulators', () =>
       await expect(processAccountDeletion(identity.uid, processing)).rejects.toMatchObject({ statusCode: 501 });
     } finally { process.env.TEAMSPEAK_ENABLE_DELETE_TESTS = saved; }
     expect(await snapshot()).toEqual(before); expect((await auth.getUser(identity.uid)).uid).toBe(identity.uid);
+  });
+
+  async function reconcileFixture(options: Parameters<typeof createAccountDeletionReconciler>[0], run: (r: ReturnType<typeof createAccountDeletionReconciler>) => Promise<void>) {
+    const previous = process.env.TEAMSPEAK_ENABLE_DELETION_RECONCILER_TESTS;
+    process.env.TEAMSPEAK_ENABLE_DELETION_RECONCILER_TESTS = 'true';
+    let r: ReturnType<typeof createAccountDeletionReconciler> | undefined;
+    try { r = createAccountDeletionReconciler(options); await run(r); }
+    finally {
+      await r?.stop();
+      if (previous === undefined) delete process.env.TEAMSPEAK_ENABLE_DELETION_RECONCILER_TESTS;
+      else process.env.TEAMSPEAK_ENABLE_DELETION_RECONCILER_TESTS = previous;
+    }
+  }
+  it('reconciler: initial pass discovers durable intent, deletes fixtures and stops its timer', async () => {
+    await intent();
+    await reconcileFixture({}, async (r) => {
+      await r.start(); expect(r.getState().lastResult?.processed).toBe(1); expect(r.getState().scheduled).toBe(true);
+      await expect(auth.getUser(identity.uid)).rejects.toMatchObject({ code: 'auth/user-not-found' });
+      const after = await snapshot(); expect(after.users).toEqual([]); expect(after.usernames).toEqual([]); expect(after.markers[0]).toMatchObject({ status: 'completed', phase: 'done' });
+      await r.stop(); expect(r.getState()).toMatchObject({ running: false, scheduled: false, stopped: true });
+    });
+  });
+  it('reconciler: respects future retries and excludes terminal markers without writes', async () => {
+    await intent();
+    await db.doc(`accountDeletions/${identity.uid}`).update({ nextAttemptAt: Timestamp.fromMillis(Date.now()+60000) });
+    const stamp=Timestamp.now();
+    await db.doc('accountDeletions/fixture-blocked').create({ status:'blocked',phase:'auth',usernameKeys:[],attempts:0,requestedAt:stamp,updatedAt:stamp });
+    await db.doc('accountDeletions/fixture-completed').create({ status:'completed',phase:'done',usernameKeys:[],attempts:1,requestedAt:stamp,updatedAt:stamp,completedAt:stamp });
+    const before=await snapshot();
+    await reconcileFixture({},async(r)=>{ expect((await r.runOnce()).eligible).toBe(0); });
+    expect(await snapshot()).toEqual(before); expect((await auth.getUser(identity.uid)).uid).toBe(identity.uid);
+    await db.doc(`accountDeletions/${identity.uid}`).update({ nextAttemptAt:Timestamp.fromMillis(Date.now()-1) });
+    await reconcileFixture({},async(r)=>{ expect((await r.runOnce()).processed).toBe(1); });
+    expect((await db.doc('accountDeletions/fixture-blocked').get()).data()?.status).toBe('blocked');
+  });
+  it('reconciler: bounded pagination eventually reaches an eligible intent after future retries', async () => {
+    await intent(); const stamp=Timestamp.now();
+    for(let i=0;i<5;i++) await db.doc(`accountDeletions/a-future-${i}`).create({ status:'pending',phase:'auth',usernameKeys:[],attempts:0,requestedAt:stamp,updatedAt:stamp,nextAttemptAt:Timestamp.fromMillis(Date.now()+60000) });
+    await reconcileFixture({pageSize:2,scanLimit:2,batchSize:1},async(r)=>{
+      expect((await r.runOnce()).processed).toBe(0); expect((await r.runOnce()).processed).toBe(0); expect((await r.runOnce()).processed).toBe(1);
+    });
+    expect((await db.doc(`accountDeletions/${identity.uid}`).get()).data()?.status).toBe('completed');
+    for(let i=0;i<5;i++) expect((await db.doc(`accountDeletions/a-future-${i}`).get()).data()?.attempts).toBe(0);
+  });
+  it('reconciler: a fresh instance recovers pending/firestore without the previous memory', async () => {
+    await intent();
+    const pending=await processAccountDeletion(identity.uid,{ beforeCleanupCommit:()=>{throw {code:14};} });
+    expect(pending.phase).toBe('firestore');
+    await reconcileFixture({},async(r)=>{ await r.start(); expect(r.getState().lastResult?.eligible).toBe(0); });
+    await db.doc(`accountDeletions/${identity.uid}`).update({nextAttemptAt:Timestamp.fromMillis(Date.now()-1)});
+    const deletion = vi.spyOn(Object.getPrototypeOf(auth), 'deleteUser');
+    try {
+      await reconcileFixture({},async(r)=>{ await r.start(); expect(r.getState().lastResult?.processed).toBe(1); });
+      expect(deletion).not.toHaveBeenCalled();
+    } finally { deletion.mockRestore(); }
+    await expect(auth.getUser(identity.uid)).rejects.toMatchObject({code:'auth/user-not-found'});
+    expect((await db.doc(`accountDeletions/${identity.uid}`).get()).data()?.status).toBe('completed');
+    expect((await snapshot()).users).toEqual([]); expect((await snapshot()).usernames).toEqual([]);
+  });
+  it('reconciler: batches and individual failures do not prevent other fixture accounts', async () => {
+    await intent(); const stamp=Timestamp.now();
+    // A Firestore-valid document ID exceeding the Auth UID limit rejects before deletion.
+    await db.doc(`accountDeletions/${'a'.repeat(129)}`).set({status:'pending',phase:'auth',usernameKeys:[],attempts:0,requestedAt:stamp,updatedAt:stamp});
+    await token('user-b');await createUserProfile({uid:'user-b',email:'user-b@example.com'},{...body,username:'Other-User2'},db);
+    await db.doc('accountDeletions/user-b').create({status:'pending',phase:'auth',usernameKeys:['other-user2'],attempts:0,requestedAt:stamp,updatedAt:stamp});
+    await reconcileFixture({batchSize:1,pageSize:2},async(r)=>{
+      const first=await r.runOnce();expect(first.eligible).toBe(1);expect(first.failed).toBe(1);
+      expect((await r.runOnce()).processed).toBe(1);expect((await r.runOnce()).processed).toBe(1);
+    });
+    await expect(auth.getUser('user-a')).rejects.toMatchObject({code:'auth/user-not-found'});await expect(auth.getUser('user-b')).rejects.toMatchObject({code:'auth/user-not-found'});
+  });
+  it('reconciler: unsafe explicit activation rejects before SDK operations',async()=>{
+    await intent();const before=await snapshot();const flag=process.env.TEAMSPEAK_ENABLE_DELETE_TESTS;
+    try { delete process.env.TEAMSPEAK_ENABLE_DELETE_TESTS;await expect(reconcileFixture({},async(r)=>{await r.start();})).rejects.toMatchObject({statusCode:501}); }
+    finally { process.env.TEAMSPEAK_ENABLE_DELETE_TESTS=flag; }
+    expect(await snapshot()).toEqual(before);expect((await auth.getUser(identity.uid)).uid).toBe(identity.uid);
   });
 
 });

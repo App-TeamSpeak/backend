@@ -423,3 +423,177 @@ seguridad), 31 Firestore y 27 conjuntas aprobadas: 336 en total. Se conservan
 los 319 casos previos. Cobertura: instrucciones/líneas 97,25 %, ramas 90,30 %,
 funciones 83,33 %. Los dos comandos de integración finalizaron correctamente
 con cierre automático de los emuladores. Sin cambios de dependencias ni commits.
+
+## TS-01.4C.2: conciliador de eliminaciones pendientes, solo emuladores
+
+`createAccountDeletionReconciler()` expone `start()`, `runOnce()`, `stop()` y
+`getState()`. Importarlo no inicia temporizadores ni abre clientes. `server.ts`
+lo construye al arrancar; sin habilitación explícita, iniciar y ejecutar son
+operaciones sin consultas ni temporizadores. El HTTP normal conserva su arranque.
+No se agregó ningún endpoint ni se conectó DELETE al procesador.
+
+Para activarlo en un proceso de pruebas preparado para los emuladores, definir
+`TEAMSPEAK_ENABLE_DELETION_RECONCILER_TESTS=true`. También son obligatorias todas
+las condiciones anteriores: NODE_ENV=test, TEAMSPEAK_ENABLE_DELETE_TESTS=true,
+DOTENV_CONFIG_PATH=/dev/null, ambos project IDs demo-teamspeak-tests, ambos hosts
+loopback distintos y sin credenciales reales. La habilitación no permite usar
+producción. Una activación explícita insegura falla antes de escuchar HTTP o
+consultar trabajos. La suite conjunta activa esta bandera localmente en cada
+caso y la restaura después; no es necesario modificar `.env`.
+
+Configuración mediante opciones internas o variables de entorno (las opciones
+prevalecen). Todas las cantidades deben ser enteros dentro de estos límites:
+
+| Variable, con prefijo TEAMSPEAK_DELETION_RECONCILER_ | Predeterminado | Límites |
+| --- | --- | --- |
+| INTERVAL_MS | 30000 | 1000–300000 ms |
+| BATCH_SIZE | 10 | 1–100 cuentas por pasada |
+| PAGE_SIZE | 25 | 1–100 documentos por consulta |
+| SCAN_LIMIT | 100 | 1–1000 documentos leídos por pasada |
+| CONCURRENCY | 1 | Solo 1; ejecución secuencial deliberada |
+
+Por ejemplo, con ambos emuladores demo ya iniciados y aislados, desde backend-api:
+
+```bash
+NODE_ENV=test DOTENV_CONFIG_PATH=/dev/null \
+FIREBASE_PROJECT_ID=demo-teamspeak-tests GCLOUD_PROJECT=demo-teamspeak-tests \
+FIRESTORE_EMULATOR_HOST=127.0.0.1:8081 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 \
+TEAMSPEAK_ENABLE_DELETE_TESTS=true TEAMSPEAK_ENABLE_DELETION_RECONCILER_TESTS=true \
+TEAMSPEAK_DELETION_RECONCILER_BATCH_SIZE=10 npm start
+```
+
+Ejecutar antes `npm run build`, usar Node 24 y un entorno sin credenciales reales.
+No ejecutar este servidor a la vez que las suites que reinician las bases demo.
+Este ejemplo no inicia los emuladores; el launcher de las pruebas sí lo hace.
+No se requiere login ni una configuración de producción.
+
+El descubrimiento usa `where(status == pending)`, orden por ID de documento y
+`startAfter` con el último ID visitado. Conserva marcadores sin nextAttemptAt;
+no ordena por ese campo opcional. El índice simple existente de status, cuyo
+orden incorpora el nombre del documento, es suficiente; no se agrega un índice
+compuesto. La consulta se comprueba con el emulador (que no certifica todos los
+requisitos de índices de producción).
+
+Cada pasada lee páginas acotadas, valida el marcador y compara nextAttemptAt
+con Timestamp del servidor: sin fecha o con fecha <= ahora es elegible. Las fechas
+futuras esperan. El procesador vuelve a comprobar el backoff con su reloj real;
+el reloj inyectable de selección no fuerza reintentos. Completed/blocked no
+participan en la consulta; los marcadores corruptos se registran sin modificarlos.
+El conciliador nunca escribe marcadores ni duplica pasos de eliminación.
+
+El cursor avanza también sobre reintentos futuros y marcadores inválidos. Si se
+alcanza el límite de lectura, la próxima pasada continúa desde allí: un elegible
+posterior no queda oculto por las primeras páginas de fechas futuras. Al llegar
+al final se reinicia el cursor para la siguiente pasada y se descubren también
+IDs nuevos anteriores. Si se alcanza el límite de cuentas a mitad de una página,
+se conserva el último ID visitado, no el último leído. La memoria contiene solo
+una página; la espera máxima depende del número de pendientes, límites y duración
+del procesamiento. No hay garantía de latencia estricta bajo crecimiento ilimitado.
+
+`start()` ejecuta una pasada inicial y programa un timeout después de terminarla.
+El intervalo es una espera entre pasadas, no una frecuencia que acumule trabajo.
+Las llamadas simultáneas a runOnce comparten la misma promesa; no se superponen
+localmente. Otras instancias/procesos siguen coordinándose mediante el procesador
+idempotente; esto no es un lock distribuido. No se crea una cola externa.
+
+Un error individual no detiene las cuentas restantes. Los fallos de consulta se
+registran y se reintentan en la siguiente pasada periódica, sin bucles inmediatos.
+La pérdida de aislamiento detiene nuevas operaciones y cancela la programación.
+Los diagnósticos usan console.error, como el backend existente, con evento y
+código controlado: no contienen UID, mensajes completos SDK ni credenciales.
+El estado operativo distingue cuentas fallidas, marcadores inválidos y errores
+de pasada. `processed` cuenta invocaciones resueltas, no garantiza completed:
+el resultado final de cada cuenta continúa estando en su marcador persistido.
+
+SIGINT/SIGTERM detienen admisión y timeout, esperan la pasada/operación en curso
+y sus recursos, y después cierran HTTP. No se aborta una transacción para parar.
+Cada consulta usa clientes dedicados de la factoría segura; el procesador crea
+sus propios clientes seguros. No hay clientes arbitrarios ni reutilización de
+aplicaciones predeterminadas. Ambos hosts se conservan y se verifican antes de
+consultas y cuentas; el conciliador no modifica variables de entorno.
+
+Un reinicio crea una instancia nueva y vuelve a descubrir marcadores persistidos;
+el cursor en memoria solo optimiza la exploración. Las pruebas comprueban reemplazo
+de instancia y recuperación de pending/firestore sin repetir deleteUser. Esto no
+simula un reinicio real de Node ni SIGKILL. Si el backend está apagado no hay
+procesamiento; al volver a arrancar con habilitación segura se ejecuta la pasada
+inicial. Las operaciones pendientes no se pierden por detener el componente.
+
+La observación P3 se corrigió localmente: ambos cierres se intentan; si el trabajo
+falló, un fallo de cierre se registra sin sustituir su error original. Si solo
+falla el cierre se devuelve DELETION_CLIENT_CLEANUP_FAILED, sin mensajes SDK.
+Las pruebas comprueban ambas situaciones sin debilitar la factoría.
+
+Para reproducir: Node 24, Java 21 y Firebase CLI disponibles, luego ejecutar
+`npm run lint`, `npm run build`, `npm run test:coverage`, `npm run test:integration`
+y `npm run test:integration:deletion`, estas dos últimas secuencialmente. La suite
+conjunta verifica descubrimiento SDK real, límites, reintentos futuros, elegibles
+tras páginas futuras, error individual, reinicio de instancia y estado durable.
+Las pruebas unitarias separadas usan reloj, temporizadores y dependencias simuladas.
+El launcher apaga los emuladores al finalizar; los tests cierran cada conciliador.
+El conciliador sigue deshabilitado en producción y DELETE no es una funcionalidad
+pública terminada. Las protecciones realtime corresponden a TS-01.4D.
+
+Verificación de TS-01.4C.2 con Node 24.18.0/npm 11.16.0: lint y build
+correctos; 310 unitarias/HTTP, 31 Firestore y 33 conjuntas aprobadas: 374 casos.
+Se conservan los 336 anteriores y se añaden 27 del conciliador, 3 del ciclo de
+vida HTTP, 2 de P3 y 6 conjuntos. La suite conjunta pasó dos ejecuciones reales.
+Cobertura: instrucciones/líneas 97,83 %, ramas 90,65 %, funciones 87,17 %.
+El control de aislamiento también se verifica inmediatamente antes de programar
+un temporizador, incluido el cambio de entorno durante el cierre de una pasada.
+Los emuladores terminaron automáticamente; no hubo commits ni cambios de dependencias.
+
+## Correcciones P2: aplicación principal y arranque HTTP
+
+La aplicación principal se llama `teamspeak-api`. `config/firebase.ts` busca solo
+ese nombre y verifica el project ID y la credencial configurada antes de reutilizarla.
+No selecciona `getApps()[0]`, ni adopta aplicaciones temporales o arbitrarias.
+Una colisión de nombre con otra configuración se rechaza. La configuración con
+cuenta de servicio en desarrollo y ADC en producción se conserva exclusivamente
+para la API principal; el procesador y conciliador no utilizan esa ruta.
+
+Para la suite conjunta, la API principal se construye mediante sus propios getters,
+con la misma validación estricta del entorno demo, credencial sintética y Firestore
+local explícito. Esto sustituye la antigua dependencia de una aplicación de fixture
+registrada antes que las demás; no añade credenciales reales ni ADC a las pruebas.
+La suite Firestore anterior conserva sus clientes inyectados de fixture. Las 17
+regresiones de P1 y los casos de P3 permanecen separados y vigentes.
+
+La factoría temporal conserva su proyecto, credenciales, destinos y cierre propios.
+Una pasada puede cerrar sus aplicaciones sin invalidar Auth/Firestore principales.
+`closeFirebase()` solo cierra recursos de la aplicación principal cuya propiedad
+coincide con la configuración; lo invoca el propietario HTTP después de cerrar HTTP,
+nunca el conciliador. No borra documentos ni identidades.
+
+`server.ts` exporta `startApiServer()` sin efectos al importarlo. La ejecución como
+entrada Node inicia HTTP después de validar la configuración. Solo el callback
+`listening` inicia el conciliador; la promesa `ready` indica que ese arranque terminó.
+Los errores de consulta recuperables conservan el contrato del conciliador:
+se registran y se programa otra pasada, sin fallar la inicialización HTTP. Una
+configuración insegura o un rechazo de start activa la ruta fatal de cierre.
+
+Las excepciones síncronas de listen, errores anteriores a listening (incluidos
+EADDRINUSE/EACCES), rechazos durante la inicialización y errores HTTP fatales
+posteriores convergen en una única parada idempotente. Se detiene y espera el
+conciliador, se intenta cerrar HTTP y después los recursos principales de Firebase.
+Un fallo de cierre no impide intentar los demás ni sustituye el error original de
+inicialización. Si no existe un fallo original, los fallos de cierre se notifican
+con SERVER_SHUTDOWN_FAILED. Los registros solo contienen eventos/códigos controlados.
+La entrada Node establece una salida no exitosa ante errores fatales.
+
+SIGINT/SIGTERM se atienden también durante el arranque. Una parada ya iniciada
+impide arrancar la conciliación cuando llegue listening. Si la pasada inicial
+está activa se espera el trabajo admitido. Las pruebas de ciclo de vida utilizan
+eventos y dependencias controladas, sin puertos reales ni pausas arbitrarias.
+Las pruebas de propiedad crean SDK reales sin solicitudes remotas y verifican
+que cerrar una aplicación temporal no produce app/app-deleted en la principal.
+
+Verificación tras ambos P2: Node 24.18.0/npm 11.16.0; lint/build correctos;
+328 unitarias/HTTP, 31 Firestore y 33 conjuntas: 392 aprobadas. Se conservan
+los 374 casos anteriores y se añaden 18 regresiones (5 de propiedad real del
+SDK y 13 adicionales de arranque/cierre; server.test.ts contiene ahora 16 casos).
+Las pruebas Firebase existentes se adaptaron al nombre y propiedad explícitos,
+sin eliminar sus cuatro escenarios de credenciales, reutilización y fallo seguro.
+Cobertura: instrucciones/líneas 97,38 %, ramas 90,77 %, funciones 87,77 %.
+P1 conserva sus 17 regresiones y P3 sus dos casos. Los emuladores se cerraron
+al terminar; no se efectuaron solicitudes a Firebase de producción ni commits.

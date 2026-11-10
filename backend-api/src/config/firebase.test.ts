@@ -4,12 +4,13 @@ const mocks = vi.hoisted(() => ({
   applicationDefault: vi.fn(() => ({ type: 'application-default' })),
   cert: vi.fn((options: unknown) => ({ type: 'cert', options })),
   getApps: vi.fn(() => [] as unknown[]),
-  initializeApp: vi.fn((options: unknown) => ({ options })),
+  initializeApp: vi.fn((options: unknown, name: string) => ({ name, options })),
   getAuth: vi.fn(() => ({ type: 'auth' })),
   getFirestore: vi.fn(() => ({ type: 'firestore' })),
 }));
 
 vi.mock('firebase-admin/app', () => ({
+  deleteApp: vi.fn(),
   applicationDefault: mocks.applicationDefault,
   cert: mocks.cert,
   getApps: mocks.getApps,
@@ -28,7 +29,9 @@ async function loadFirebase(env: Record<string, unknown>) {
 describe('Firebase Admin configuration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.getApps.mockReturnValue([]);
+    const registered: unknown[] = [];
+    mocks.getApps.mockReturnValue(registered);
+    mocks.initializeApp.mockImplementation((options, name) => { const app = { name, options }; registered.push(app); return app; });
   });
 
   it('initializes with service-account credentials and reuses the app', async () => {
@@ -50,14 +53,16 @@ describe('Firebase Admin configuration', () => {
   });
 
   it('reuses an already initialized Firebase app', async () => {
-    const existingApp = { name: 'existing' };
+    const credential = { type: 'application-default' };
+    mocks.applicationDefault.mockReturnValue(credential);
+    const existingApp = { name: 'teamspeak-api', options: { credential } };
     mocks.getApps.mockReturnValue([existingApp]);
-    const firebase = await loadFirebase({ NODE_ENV: 'development' });
+    const firebase = await loadFirebase({ NODE_ENV: 'production' });
 
     firebase.getFirestoreDb();
 
     expect(mocks.initializeApp).not.toHaveBeenCalled();
-    expect(mocks.applicationDefault).not.toHaveBeenCalled();
+    expect(mocks.applicationDefault).toHaveBeenCalledOnce();
     expect(mocks.getFirestore).toHaveBeenCalledWith(existingApp);
   });
 
@@ -69,7 +74,7 @@ describe('Firebase Admin configuration', () => {
     expect(mocks.applicationDefault).toHaveBeenCalledTimes(1);
     expect(mocks.initializeApp).toHaveBeenCalledWith({
       credential: { type: 'application-default' },
-    });
+    }, 'teamspeak-api');
   });
 
   it('fails clearly in development when credentials are missing', async () => {

@@ -73,4 +73,24 @@ describe('destructive processor client provenance (no remote requests)', () => {
     await expect(processAccountDeletion('fixture')).rejects.toMatchObject({ statusCode: 501 });
     expect(operation).not.toHaveBeenCalled(); expect(getApps().map((app) => app.name)).toEqual(before);
   });
+  it('preserves the processing error if resource cleanup also fails (P3)', async () => {
+    const original = new Error('controlled original');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const before = getApps().map((app) => app.name);
+    await expect(withDeletionEmulatorClients(async ({ firestore }) => {
+      vi.spyOn(firestore, 'terminate').mockRejectedValue(new Error('PRIVATE cleanup'));
+      throw original;
+    })).rejects.toBe(original);
+    expect(getApps().map((app) => app.name)).toEqual(before);
+    expect(log).toHaveBeenCalledWith({ event: 'deletion_clients_cleanup_failed', code: 'DELETION_CLIENT_CLEANUP_FAILED' });
+    expect(JSON.stringify(log.mock.calls)).not.toContain('PRIVATE');
+  });
+  it('reports a controlled cleanup error after successful processing', async () => {
+    const before = getApps().map((app) => app.name);
+    await expect(withDeletionEmulatorClients(async ({ firestore }) => {
+      vi.spyOn(firestore, 'terminate').mockRejectedValue(new Error('PRIVATE cleanup'));
+    })).rejects.toMatchObject({ code: 'DELETION_CLIENT_CLEANUP_FAILED' });
+    expect(getApps().map((app) => app.name)).toEqual(before);
+  });
+
 });
