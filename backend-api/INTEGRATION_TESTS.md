@@ -192,7 +192,7 @@ antes/después de rechazos; al competir POST/PATCH con el marcador, el estado fi
 debe coincidir con el que leyó la transacción que confirmó el bloqueo. También
 comprueban operaciones confirmadas previamente y marcadores de otros UID.
 
-La eliminación irreversible y la conciliación siguen sin implementar. Antes de
+En esta base aún no se implementaba eliminación irreversible ni conciliación. Antes de
 habilitar uso público será obligatorio añadir el control de estado en
 backend-realtime (handshake, eventos y sockets existentes). TS-01.4B introduce una
 excepción exacta para DELETE /api/users/me con autenticación propia y activación
@@ -277,7 +277,7 @@ conciliación y protección realtime (TS-01.4C/4D).
 Límite: Authentication Emulator emite tokens sin la firma criptográfica de
 producción. Estas pruebas comprueban el flujo SDK/HTTP local, no la validación de
 firmas reales ni el login Google real. Los fallos controlados y auth_time inválidos
-se prueban con mocks. Las identidades solo se limpian mediante el reset de fixtures
+se prueban con mocks. En TS-01.4B las identidades solo se limpiaban mediante el reset de fixtures
 del emulador; el endpoint nunca llama deleteUser ni elimina documentos.
 
 Resultado TS-01.4B (Node 24.18.0, 9 de noviembre de 2026): lint/build correctos;
@@ -286,3 +286,140 @@ Resultado TS-01.4B (Node 24.18.0, 9 de noviembre de 2026): lint/build correctos;
 unitarios/HTTP/contrato y 12 de integración conjunta. Cobertura: instrucciones y
 líneas 96,68 %, ramas 91,17 %, funciones 78,43 %. Ambos emuladores se detuvieron
 mediante emulators:exec. No se modificaron dependencias ni se realizaron commits.
+
+## TS-01.4C.1: procesador interno, exclusivamente con fixtures de emuladores
+
+La suite conjunta del comando `npm run test:integration:deletion` incluye ahora
+el procesador. Conserva los requisitos, puertos configurables y aislamiento de
+TS-01.4B. Ejecutar las dos suites de integración secuencialmente: reinician el
+mismo proyecto demo entre casos. No se requieren dependencias adicionales.
+
+Las pruebas crean identidades ficticias, registran la intención mediante DELETE
+y llaman internamente a `processAccountDeletion(uid)` (con hooks locales para los fallos controlados).
+Ambos clientes son SDK reales de los emuladores. La función repite las protecciones
+de `deletion-test.ts` y verifica ambos project IDs antes de operar, incluso cuando
+se invoca directamente. No acepta reservas del cliente ni crea intenciones.
+No se importa desde el controlador: DELETE sigue devolviendo 202 pending y
+permanece deshabilitado públicamente. No existe endpoint para procesar un UID.
+
+Combinaciones válidas y avance permitido:
+
+| Estado/fase | Comportamiento |
+| --- | --- |
+| pending/auth | Eliminar identidad; user-not-found también satisface el paso. |
+| pending/firestore | Limpiar recursos propios y completar atómicamente, sin repetir Auth. |
+| completed/done | Terminal: no escribir ni eliminar nada. |
+| blocked/auth o blocked/firestore | Terminal para el procesador; requiere intervención. |
+
+`completed` exige `completedAt`; los demás estados no lo admiten. Un marcador
+ausente o malformado se rechaza antes de operaciones destructivas; no se repara
+automáticamente. El flujo normal es pending/auth → pending/firestore →
+completed/done. Nunca se retrocede de fase ni se reinician estados terminales.
+
+Una transacción de admisión lee y valida marcador, perfil y reservas. Rechaza
+propietarios contradictorios y claves propias no capturadas por la intención,
+antes de eliminar Auth. `deleteUser(uid)` ocurre fuera de las transacciones.
+Después de confirmar eliminación o ausencia se persiste la fase firestore.
+La limpieza vuelve a comprobar todo con lecturas previas a las escrituras:
+perfil, consulta de reservas por UID y cada clave histórica. Solo elimina
+documentos propios; las ausencias coherentes se toleran, incluso con perfil
+incompleto. Perfil, reservas y marcador completed se confirman en una única
+transacción. No se realiza compensación ni se recrean identidades.
+
+Cada ejecución admitida incrementa `attempts` transaccionalmente; los reintentos
+internos del SDK no duplican ese incremento. No se incrementa al encontrar
+completed, blocked, marcador inválido o `nextAttemptAt` aún futuro. Si Firestore
+falla antes de confirmar admisión, no hay operaciones Auth ni incremento durable.
+Timeouts, indisponibilidad y resultados desconocidos conservan pending y guardan
+un código controlado, sin mensajes SDK. La espera es 30, 60, 120, 240, 480, 960,
+1920 y como máximo 3600 segundos. No hay temporizador, cola ni conciliador.
+Una nueva invocación después de ese instante reanuda desde el marcador persistido.
+Si Firestore sigue inaccesible tampoco puede persistirse el diagnóstico: la
+invocación falla y el siguiente ejecutor vuelve a leer el último estado durable.
+
+Contradicciones de propiedad o claves inesperadas producen blocked con
+PROFILE_INCONSISTENT. Permisos denegados conocidos producen
+AUTH_CONFIGURATION_ERROR o FIRESTORE_PERMISSION_DENIED. Un marcador corrupto
+se rechaza con ACCOUNT_DELETION_INCONSISTENT sin modificarlo. Ninguno autoriza
+limpieza automática. No se interpreta un resultado incierto como error permanente.
+
+Las transacciones coordinan ejecutores concurrentes sin leases. El contador no
+retrocede; un error antiguo solo puede escribir si siguen coincidiendo fase e
+intento admitido. Dos llamadas Auth concurrentes son posibles: ausencia es éxito.
+La transacción final se aplica una sola vez; repetir un completed no toca una
+reserva que otro usuario haya reutilizado. No se deben recrear administrativamente
+identidades con el mismo UID durante ni después de una eliminación persistida:
+los flujos normales ya están bloqueados por el marcador. La coordinación con
+acciones administrativas externas no forma parte de esta etapa.
+
+Al completar se conservan estado/fase, requestedAt, updatedAt, completedAt y
+attempts; usernameKeys pasa a [] y desaparecen nextAttemptAt/lastErrorCode.
+Las claves históricas solo se descartan después de comprobar y confirmar toda
+la limpieza. El marcador mínimo sigue bloqueando el UID eliminado.
+
+Los puntos de inyección de fallos son opciones locales de la función, sin
+banderas globales ni entradas HTTP. Las pruebas unitarias usan mocks; la suite
+conjunta usa transacciones y cuentas reales de los emuladores. Los hooks simulan
+fallos antes de confirmar fase/limpieza o pérdida de respuesta después del commit.
+Se comprueban el estado durable, rollback de escrituras encoladas, nueva
+invocación tras fallo, competencia entre dos procesadores, bloqueo POST/PATCH,
+propiedad ajena y reutilización del username. Estos abortos controlados del
+callback no equivalen a provocar una caída real del servidor o de la red.
+
+Los emuladores no acreditan IAM, cuotas, latencia ni firma de tokens en producción.
+Continúan pendientes TS-01.4C.2 (conciliación automática) y las protecciones
+realtime antes de considerar habilitación pública. Este procesador no se ejecuta
+al arrancar el backend y no constituye una funcionalidad disponible en producción.
+
+Resultado TS-01.4C.1 (Node 24.18.0, npm 11.16.0): lint/build y diff check
+correctos; 261/261 unitarias/HTTP, 31/31 Firestore y 27/27 conjuntas.
+Total: 319 casos, conservando los 270 anteriores y añadiendo 34 unitarios y
+15 conjuntos. Cobertura unitaria: instrucciones/líneas 97,15 %, ramas 89,86 %,
+funciones 82,53 %. Procesador: instrucciones/líneas y funciones 100 %, ramas
+85,85 %. La cobertura global de ramas baja desde 91,17 % al incorporar las
+nuevas rutas del procesador; no se retiraron pruebas anteriores. Ambos comandos
+de integración finalizaron con código 0 y apagaron sus emuladores.
+
+
+## Corrección P1: procedencia y destino de los clientes destructivos
+
+El procesador ya no admite opciones `auth` ni `firestore`: las rechaza en ejecución,
+además de excluirlas de su interfaz TypeScript. No reutiliza la aplicación por
+omisión ni clientes de `config/firebase.ts`. Cada invocación utiliza
+`withDeletionEmulatorClients`, que valida el entorno antes de construir recursos.
+
+La factoría crea una aplicación Admin con nombre único, project ID demo y un
+proveedor explícito del token sintético `owner`. Auth se construye después de
+validar el host local: el SDK instalado fija esa URL al crear la instancia.
+Firestore se construye directamente con la API pública `new Firestore`, proyecto
+explícito, host/puerto loopback, `ssl: false` y credenciales sintéticas sin clave
+válida. Esto evita ADC; la factoría Firestore de Admin instalada no admite el
+proveedor de credenciales local utilizado para Auth. No se generan ni cargan
+credenciales reales. El destino Firestore queda configurado en la instancia.
+
+Los dos hosts se capturan al construir y se vuelven a comparar antes de cada
+transacción y llamada Auth. Cambiar las variables después invalida la operación;
+no redirige ni reutiliza los clientes. Las instancias pertenecen al ámbito de la
+invocación: `finally` termina Firestore y elimina la aplicación, incluso si falla
+el callback. No hay caché de clientes destructivos ni recursos permanentes nuevos.
+
+Las pruebas unitarias del procesador sustituyen el módulo de la factoría mediante
+Vitest; esto no agrega una opción de inyección a la interfaz ejecutable. Los hooks
+solo controlan el tiempo o simulan fallos, y no suministran instancias SDK. Las
+pruebas conjuntas usan la factoría real para eliminar fixtures y conservan la
+comprobación de recuperación y concurrencia.
+
+Las regresiones crean clientes previamente configurados para destinos no locales
+sin efectuar solicitudes. Las propiedades privadas del SDK solo se inspeccionan
+en esas pruebas para acreditar el escenario anterior; la protección ejecutable
+utiliza construcción controlada y API pública. Se verifican además configuración
+insegura, cambios de hosts, rechazo directo y cierre en éxito y error. La prueba
+de proyecto usa una comprobación de existencia (`'projectId' in firestore`), pues
+el getter de ejecución no está declarado por el tipo Firestore instalado.
+
+Verificación tras corregir P1: Node 24.18.0 y npm 11.16.0; lint y build
+correctos; 278 pruebas unitarias/HTTP (261 anteriores más 17 regresiones de
+seguridad), 31 Firestore y 27 conjuntas aprobadas: 336 en total. Se conservan
+los 319 casos previos. Cobertura: instrucciones/líneas 97,25 %, ramas 90,30 %,
+funciones 83,33 %. Los dos comandos de integración finalizaron correctamente
+con cierre automático de los emuladores. Sin cambios de dependencias ni commits.
