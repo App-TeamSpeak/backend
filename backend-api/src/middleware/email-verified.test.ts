@@ -31,6 +31,7 @@ it('permits authenticated onboarding before verification and defaults avatar to 
   expect(mocks.create).toHaveBeenCalledWith({ uid: 'fixture', email: 'fixture@example.invalid' }, { nombre: 'Ana', apellido: 'Pérez', username: 'Ana-user1', avatarUrl: null });
 });
 it('accepts a verified token without depending on its provider', async () => {
+  mocks.get.mockResolvedValue({ profileStatus: 'complete' });
   mocks.verify.mockResolvedValue({ uid: 'fixture', email_verified: true, firebase: { sign_in_provider: 'google.com' } });
   expect((await request(app).patch('/api/users/me').set('Authorization', 'Bearer fixture').send({ nombre: 'Ana' })).status).toBe(200);
   expect(mocks.update).toHaveBeenCalledWith({ uid: 'fixture', emailVerified: true }, { nombre: 'Ana' });

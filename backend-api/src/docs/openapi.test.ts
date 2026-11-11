@@ -60,7 +60,7 @@ describe('OpenAPI user contracts', () => {
     expect(schema).not.toHaveProperty('required');
     const patch = openapi.paths['/api/users/me'].patch;
     expect(patch.security).toEqual([{ bearerAuth: [] }]);
-    expect(Object.keys(patch.responses)).toEqual(expect.arrayContaining(['200', '400', '401', '404', '409', '500', '503']));
+    expect(Object.keys(patch.responses)).toEqual(expect.arrayContaining(['200', '400', '401', '403', '404', '409', '500', '503']));
     for (const example of Object.values(patch.requestBody.content['application/json'].examples)) {
       expect(matches(example.value, schema)).toBe(true);
     }

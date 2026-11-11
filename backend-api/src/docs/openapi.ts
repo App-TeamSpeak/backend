@@ -145,7 +145,7 @@ export const openapi = {
       },
       patch: {
         tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Actualiza parcialmente el perfil autenticado',
-        description: 'Requiere email_verified=true en el ID token; de lo contrario 403 EMAIL_NOT_VERIFIED. Solo nombre, apellido, username y avatarUrl. Campos omitidos se conservan; omitir avatarUrl conserva el avatar actual y avatarUrl null lo elimina. El cambio de username mueve la reserva atómicamente. Mayúsculas solo cambian presentación. Valores equivalentes tras normalizar no generan escrituras ni cambian updatedAt. Requiere perfil completo y reserva consistente. Cache-Control: no-store.',
+        description: 'Requiere email_verified=true en el ID token; de lo contrario 403 EMAIL_NOT_VERIFIED. Solo nombre, apellido, username y avatarUrl. Campos omitidos se conservan; omitir avatarUrl conserva el avatar actual y avatarUrl null lo elimina. El cambio de username mueve la reserva atómicamente. Mayúsculas solo cambian presentación. Valores equivalentes tras normalizar no generan escrituras ni cambian updatedAt. Requiere perfil completo (403 PROFILE_INCOMPLETE si falta o está incompleto) y reserva consistente. Cache-Control: no-store.',
         requestBody: {
           required: true, content: { 'application/json': {
             schema: { $ref: '#/components/schemas/UserPatch' },
@@ -157,12 +157,12 @@ export const openapi = {
           } },
         },
         responses: {
-          403: { description: 'EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           200: { description: 'Perfil actualizado o repetición sin cambios', content: { 'application/json': { schema: { $ref: '#/components/schemas/UserResponse' } } } },
           400: { description: 'VALIDATION_ERROR o INVALID_JSON', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           401: { description: 'AUTH_REQUIRED o AUTH_INVALID', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          404: { description: 'PROFILE_NOT_FOUND: completar registro mediante POST', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          409: { description: 'USERNAME_TAKEN, PROFILE_INCOMPLETE o PROFILE_INCONSISTENT', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          404: { description: 'PROFILE_NOT_FOUND: el perfil desapareció después de autorizar la solicitud; completar registro mediante POST', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          409: { description: 'USERNAME_TAKEN o PROFILE_INCONSISTENT', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           500: { description: 'INTERNAL_ERROR', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           503: { description: 'AUTH_UNAVAILABLE o FIRESTORE_UNAVAILABLE', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
@@ -189,7 +189,8 @@ export const openapi = {
         security: [{ bearerAuth: [] }],
         summary: 'Lista las salas del usuario',
         responses: {
-          403: { description: 'EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada; Firestore pendiente' }, 401: { description: 'No autenticado' } },
+          409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
+          403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada; Firestore pendiente' }, 401: { description: 'No autenticado' } },
       },
       post: {
         tags: ['Rooms'],
@@ -197,27 +198,34 @@ export const openapi = {
         summary: 'Crea una sala de estudio',
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string', minLength: 1, maxLength: 80 } } } } } },
         responses: {
-          403: { description: 'EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 201: { description: 'Sala creada' }, 400: { description: 'Datos inválidos' }, 501: { description: 'Ruta preparada; Firestore pendiente' } },
+          409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
+          403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 201: { description: 'Sala creada' }, 400: { description: 'Datos inválidos' }, 501: { description: 'Ruta preparada; Firestore pendiente' } },
       },
     },
     '/api/rooms/{roomId}': {
       parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }],
       get: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Obtiene una sala', responses: {
-          403: { description: 'EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' } } },
+          409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
+          403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' } } },
       patch: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Edita una sala propia', responses: {
-          403: { description: 'EMAIL_NOT_VERIFIED, sin permisos o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' } } },
+          409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
+          403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED, sin permisos o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' } } },
       delete: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Elimina una sala propia', responses: {
-          403: { description: 'EMAIL_NOT_VERIFIED, sin permisos o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' } } },
+          409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
+          403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED, sin permisos o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' } } },
     },
     '/api/rooms/{roomId}/join': {
       post: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Se une a una sala', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: {
-          403: { description: 'EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' }, 404: { description: 'Sala no encontrada' } } },
+          409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
+          403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' }, 404: { description: 'Sala no encontrada' } } },
     },
     '/api/rooms/{roomId}/messages': {
       get: { tags: ['Messages'], security: [{ bearerAuth: [] }], summary: 'Obtiene el historial de chat', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: {
-          403: { description: 'EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada; Firestore pendiente' } } },
+          409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
+          403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada; Firestore pendiente' } } },
       post: { tags: ['Messages'], security: [{ bearerAuth: [] }], summary: 'Guarda un mensaje', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: {
-          403: { description: 'EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada; Firestore pendiente' } } },
+          409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
+          403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada; Firestore pendiente' } } },
     },
   },
 } as const;

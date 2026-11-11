@@ -1,3 +1,4 @@
+import { Timestamp } from 'firebase-admin/firestore';
 import { randomUUID } from 'node:crypto';
 import { createServer, type Server as HttpServer } from 'node:http';
 import { TestSocketClient } from './socket-client';
@@ -107,6 +108,11 @@ async function fixtureToken(uid: string): Promise<string> {
   const email = `${uid}@example.com`;
   const password = `${randomUUID()}aA1!`;
   await getAuth(fixtureApp!).createUser({ uid, email, emailVerified: true, password });
+  const username = `Fixture_${uid}`;
+  const db = firebase.getFirestoreDb(); const batch = db.batch();
+  batch.create(db.doc(`users/${uid}`), { uid, email, nombre: 'Fixture', apellido: 'Realtime', username, usernameKey: username.toLowerCase(), avatarUrl: null, profileStatus: 'complete', createdAt: Timestamp.now(), updatedAt: Timestamp.now() });
+  batch.create(db.doc(`usernames/${username.toLowerCase()}`), { uid });
+  await batch.commit();
   const response = await fetch(`${authOrigin}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=emulator-only`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password, returnSecureToken: true }), signal: AbortSignal.timeout(5000),
@@ -191,4 +197,13 @@ it('cancels a real observer after the last socket and creates a fresh one on rec
   await firebase.getFirestoreDb().doc('accountDeletions/rt-generation').create({ status: 'completed' });
   await next.wait('disconnect');
   expect(transport!.sockets.sockets.size).toBe(0);
+});
+it('US-02 reads authoritative profiles through the isolated boundary and rejects missing/partial data', async () => {
+  const { requireCompleteProfile } = await import('../services/profile-state.service.js');
+  await expect(requireCompleteProfile('rt-profile')).rejects.toMatchObject({ code: 'PROFILE_INCOMPLETE' });
+  await firebase.getFirestoreDb().doc('users/rt-profile').create({ uid: 'rt-profile', profileStatus: 'incomplete' });
+  await expect(requireCompleteProfile('rt-profile')).rejects.toMatchObject({ code: 'PROFILE_INCOMPLETE' });
+  await firebase.getFirestoreDb().doc('users/rt-profile').delete();
+  await fixtureToken('rt-profile');
+  await expect(requireCompleteProfile('rt-profile')).resolves.toBeUndefined();
 });

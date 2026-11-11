@@ -68,6 +68,7 @@ describe('authenticated user profile HTTP contracts', () => {
 describe('PATCH /api/users/me', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mocks.getUserProfile.mockResolvedValue(data);
     mocks.getFirebaseAuth.mockReturnValue({ verifyIdToken: mocks.verifyIdToken });
     mocks.verifyIdToken.mockResolvedValue({ uid: 'uid-1', email: 'ana@example.com', email_verified: true });
   });
