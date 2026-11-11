@@ -22,6 +22,7 @@ export const notFound: RequestHandler = (_request, response) => {
 };
 
 export const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
+  if (response.destroyed || response.writableEnded) return;
   if (error instanceof SyntaxError && 'type' in error && error.type === 'entity.parse.failed') {
     response.status(400).json({ success: false, code: 'INVALID_JSON', message: 'El cuerpo JSON no es válido.' });
     return;

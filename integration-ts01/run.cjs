@@ -91,6 +91,7 @@ async function main() {
   if (+process.versions.node.split('.')[0] !== 24) throw new Error('Node 24 required');
   if (process.platform === 'win32') throw new Error('POSIX process groups required');
   const internal = process.argv[2] === '--run';
+  const loginOnly = process.argv.includes('--login');
   const directory = internal ? process.argv[3] : mkdtempSync(path.join(tmpdir(), 'teamspeak-ts01-'));
   const nonce = internal ? process.argv[4] : randomUUID();
   const abort = new AbortController();
@@ -118,7 +119,7 @@ async function main() {
       for (const key of Object.keys(isolated).filter(key => key.includes('HOST') || key.includes('PROJECT') || key.startsWith('TEAMSPEAK_'))) {
         if (process.env[key] !== isolated[key]) throw new Error('Use the complete TS01 launcher');
       }
-      await run(process.execPath, ['--test','--test-concurrency=1','--test-reporter=spec',path.join(__dirname, 'ts01.test.cjs')], 'joint-tests', 180000, root);
+      await run(process.execPath, ['--test','--test-concurrency=1','--test-reporter=spec',loginOnly ? path.join(root, 'integration-us03/session.test.cjs') : path.join(__dirname, 'ts01.test.cjs')], loginOnly ? 'login-tests' : 'joint-tests', 180000, root);
       if (abort.signal.aborted) throw new Error('TS01_INTERRUPTED');
       // Only after successful runner exit AND its process-group cleanup.
       writeFileSync(path.join(directory, 'completed.json'), JSON.stringify({ nonce, project, success: true }), { mode: 0o600, flag: 'wx' });
@@ -144,7 +145,7 @@ async function main() {
     };
     const filename = path.join(directory, 'firebase.json'); writeFileSync(filename, JSON.stringify(config));
     const quote = value => "'" + value.replace(/'/g, "'\"'\"'") + "'";
-    const command = [process.execPath, __filename, '--run', directory, nonce].map(quote).join(' ');
+    const command = [process.execPath, __filename, '--run', directory, nonce, ...(loginOnly ? ['--login'] : [])].map(quote).join(' ');
     const result = await run(process.env.TEAMSPEAK_FIREBASE_CLI || 'firebase', ['emulators:exec','--only','auth,firestore','--project',project,'--config',filename,'--non-interactive',command], 'emulator-suite', 240000, directory);
     if (abort.signal.aborted || !confirmCompletion(directory, nonce, result)) throw new Error('TS01_COMPLETION_NOT_CONFIRMED');
     console.log({ event: 'ts01_validation_completed', success: true });

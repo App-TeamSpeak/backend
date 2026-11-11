@@ -22,7 +22,7 @@ export const openapi = {
   info: {
     title: 'TeamSpeak Study Room API',
     version: '0.1.0',
-    description: 'API REST para autenticación, perfiles, salas de estudio y mensajes persistentes. Identidad autenticada no implica cuenta activa ni perfil completo: las rutas privadas rechazan cualquier marcador accountDeletions del UID, incluso completado o bloqueado. La eliminación real aún no está implementada; DELETE solo puede registrar intenciones en pruebas explícitamente aisladas.',
+    description: 'API REST para autenticación, perfiles, salas de estudio y mensajes persistentes. Identidad autenticada no implica cuenta activa ni perfil completo: las rutas privadas rechazan cualquier marcador accountDeletions del UID, incluso completado o bloqueado. REST valida ID tokens Firebase sin solicitar comprobación global de revocación; los errores conocidos de red o cuota de Authentication responden 503 AUTH_UNAVAILABLE. Las lecturas de autorización Firestore comparten un plazo de 5 segundos por solicitud y fallan con 503 FIRESTORE_UNAVAILABLE; ese plazo no se aplica a transacciones o escrituras. Durante el apagado se rechazan nuevas solicitudes con 503 SERVER_STOPPED. Login, renovación y logout local corresponden al Firebase Client SDK; signOut no invalida inmediatamente los ID tokens ni desconecta Socket.IO. La eliminación real aún no está implementada; DELETE solo puede registrar intenciones en pruebas explícitamente aisladas.',
   },
   servers: [{ url: '/', description: 'Servidor actual' }],
   tags: [

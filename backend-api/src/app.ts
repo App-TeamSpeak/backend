@@ -10,6 +10,12 @@ import { apiRouter } from './routes/api.routes';
 import { sprint0Router } from './routes/sprint0.routes';
 
 export const app = express();
+let acceptingRequests = true;
+export function setApiAcceptingRequests(value: boolean) { acceptingRequests = value; }
+app.use((_request, response, next) => {
+  if (!acceptingRequests) { response.status(503).json({ success: false, code: 'SERVER_STOPPED', message: 'El servidor se está deteniendo.' }); return; }
+  next();
+});
 const corsOrigin = env.CORS_ORIGINS.length
   ? env.CORS_ORIGINS
   : env.NODE_ENV === 'production' ? false : true;

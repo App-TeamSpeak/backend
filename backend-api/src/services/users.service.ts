@@ -1,3 +1,4 @@
+import { readAuthorizationDocument } from './authorization-read.service';
 import { Timestamp, type Firestore } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import { AppError } from '../middleware/errors';
@@ -41,7 +42,7 @@ function serialize(profile: UserDocument) {
 export async function getUserProfile(identity: UserIdentity, db?: Firestore) {
   return withFirestore(async (firestore) => {
     await ensureAccountActive(identity.uid, firestore);
-    const snapshot = await getFirestoreCollections(firestore).users.doc(identity.uid).get();
+    const snapshot = await readAuthorizationDocument(getFirestoreCollections(firestore).users.doc(identity.uid));
     const profile = snapshot.exists ? inspectProfile(snapshot.data(), identity.uid).complete : null;
     return { uid: identity.uid, profileStatus: profile ? 'complete' as const : 'incomplete' as const, profile: profile ? serialize(profile) : null };
   }, db);
