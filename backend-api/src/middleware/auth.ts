@@ -8,6 +8,7 @@ declare global {
       user?: {
         uid: string;
         authTime?: number;
+        emailVerified?: boolean;
         email?: string;
         name?: string;
       };
@@ -38,6 +39,7 @@ export async function requireAuth(request: Request, _response: Response, next: N
     const decoded = await firebaseAuth.verifyIdToken(token);
     request.user = {
       uid: decoded.uid,
+      ...(decoded.email_verified === true ? { emailVerified: true } : {}),
       ...(decoded.email ? { email: decoded.email } : {}),
       ...(decoded.name ? { name: decoded.name } : {}),
     };

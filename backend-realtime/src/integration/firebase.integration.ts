@@ -106,7 +106,7 @@ it('blocks remote test transports locally before transmission', () => {
 async function fixtureToken(uid: string): Promise<string> {
   const email = `${uid}@example.com`;
   const password = `${randomUUID()}aA1!`;
-  await getAuth(fixtureApp!).createUser({ uid, email, password });
+  await getAuth(fixtureApp!).createUser({ uid, email, emailVerified: true, password });
   const response = await fetch(`${authOrigin}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=emulator-only`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password, returnSecureToken: true }), signal: AbortSignal.timeout(5000),

@@ -13,7 +13,7 @@ import { TestSocketClient } from '../integration/socket-client';
 let http: Server; let io: ReturnType<typeof createRealtimeServer>; let origin: string; let clients: TestSocketClient[];
 beforeEach(async () => {
   vi.resetAllMocks(); clients = [];
-  mocks.verifyToken.mockImplementation(async (token) => ({ uid: token }));
+  mocks.verifyToken.mockImplementation(async (token) => ({ uid: token, email_verified: true }));
   mocks.requireActiveAccount.mockResolvedValue(undefined);
   mocks.watchAccountDeletion.mockImplementation((_uid, changed) => { queueMicrotask(() => changed(false)); return vi.fn(); });
   mocks.startAccountAuthorization.mockImplementation((uid) => {
@@ -269,4 +269,13 @@ it('observer failure cannot free the shared budget of outstanding SDK reads', as
   raw.resolve(); await new Promise<void>((resolve) => setImmediate(resolve));
   mocks.startAccountAuthorization.mockImplementation(() => ({ authorized: Promise.resolve(), settled: Promise.resolve() }));
   expect(await fresh.request('media:state', {})).toEqual({ ok: true }); log.mockRestore();
+});
+
+it.each([false, undefined, 'true', 1])('rejects an unverified handshake despite client-supplied verification: %s', async (claim) => {
+  mocks.verifyToken.mockResolvedValue({ uid: 'fixture', email_verified: claim });
+  const value = client({ token: 'fixture', emailVerified: true, email_verified: true });
+  expect(await value.wait('connect_error')).toMatchObject({ message: 'EMAIL_NOT_VERIFIED', data: { code: 'EMAIL_NOT_VERIFIED' } });
+  expect(io.sockets.sockets.size).toBe(0);
+  expect(mocks.requireActiveAccount).not.toHaveBeenCalled();
+  expect(mocks.watchAccountDeletion).not.toHaveBeenCalled();
 });

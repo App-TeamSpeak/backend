@@ -432,3 +432,12 @@ del caso de desconexión ya descrita, y se añaden 25 casos. Cobertura global:
 97,26 % instrucciones/líneas, 89,88 % ramas y 92,98 % funciones. account-access.ts
 y socket.ts alcanzan 100 % de instrucciones/líneas. Los emuladores se cerraron
 al finalizar.
+
+### US-01: verificación de correo
+
+El handshake exige `email_verified === true` en el ID token verificado por Firebase
+Admin, además de las comprobaciones de revocación, marcadores y supervisión existentes.
+En caso contrario rechaza con `EMAIL_NOT_VERIFIED`. Las banderas del cliente y el
+proveedor de identidad no omiten el control. Tras verificar mediante el enlace nativo,
+el cliente debe refrescar el ID token y reconectar. Los ocho eventos mantienen sus
+guards y límites. Consulte `../docs/us-01-backend.md` para el flujo API y Firebase.
