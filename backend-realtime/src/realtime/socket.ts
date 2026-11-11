@@ -19,6 +19,7 @@ export const MAX_IN_FLIGHT_EVENT_AUTHORIZATIONS_PER_SERVER = 64;
 const messages = {
   AUTHORIZATION_BUSY: 'Hay demasiadas autorizaciones pendientes. Inténtalo más tarde.',
   AUTH_REQUIRED: 'Se requiere autenticación.',
+  EMAIL_NOT_VERIFIED: 'Verifica tu correo y actualiza el ID token para acceder.',
   AUTH_INVALID: 'La autenticación no es válida.',
   ACCOUNT_UNAVAILABLE: 'La cuenta no puede realizar esta operación.',
   AUTHORIZATION_UNAVAILABLE: 'No se pudo comprobar la autorización.',
@@ -69,6 +70,7 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
         deny(error instanceof AccountAuthorizationError || error instanceof FirebaseConfigurationError ? 'AUTHORIZATION_UNAVAILABLE' : 'AUTH_INVALID');
         return;
       }
+      if (user.email_verified !== true) { deny('EMAIL_NOT_VERIFIED'); return; }
       await requireActiveAccount(user.uid);
       socket.data.user = user;
       await access.attach(user.uid, {

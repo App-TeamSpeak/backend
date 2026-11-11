@@ -1,5 +1,6 @@
 import { deleteMe } from '../controllers/users.controller';
 import { requireDeletionAuth, requireDeletionTests } from '../middleware/deletion-auth';
+import { requireVerifiedEmail } from '../middleware/email-verified';
 import { Router } from 'express';
 import { requireActiveAccount } from '../middleware/account-active';
 import { requireAuth } from '../middleware/auth';
@@ -12,4 +13,5 @@ apiRouter.delete('/users/me', requireDeletionTests, requireDeletionAuth, deleteM
 apiRouter.use(requireAuth);
 apiRouter.use(requireActiveAccount);
 apiRouter.use('/users', usersRouter);
+apiRouter.use(requireVerifiedEmail);
 apiRouter.use('/rooms', roomsRouter);

@@ -177,5 +177,15 @@ La misma suite incorpora cuatro casos de registro manual desde Authentication
 Emulator mediante REST cliente: recorrido POST/GET y persistencia/idempotencia,
 aislación de identidades y campos protegidos, competencia concurrente por username
 y rechazo de correo duplicado. Se conservan los seis escenarios TS-01 anteriores;
-el lanzador ejecuta diez casos en total. No se modifican contratos ni servicios.
+esa etapa ejecutó diez casos en total. No se modifican contratos ni servicios.
 Consulte `../docs/us-01-backend.md` para la matriz y decisiones funcionales pendientes.
+
+## Ajuste de verificación de correo US-01
+
+La suite actual ejecuta quince casos: conserva los diez anteriores y añade enlace
+nativo local con token antiguo/nuevo y acceso HTTP/Socket.IO, tres dominios sin avatar
+y una sonda de limitaciones de contraseñas del emulador. Los fixtures históricos
+que necesitan acceso privado declaran correo verificado. No se envían correos reales.
+La política efectiva de producción no se acredita con el emulador. Detalles y pasos
+de Firebase Console en `../docs/us-01-backend.md`. Estas integraciones siguen fuera
+del pipeline habitual y no generan LCOV de Vitest automáticamente.

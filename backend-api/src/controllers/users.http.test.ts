@@ -69,7 +69,7 @@ describe('PATCH /api/users/me', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.getFirebaseAuth.mockReturnValue({ verifyIdToken: mocks.verifyIdToken });
-    mocks.verifyIdToken.mockResolvedValue({ uid: 'uid-1', email: 'ana@example.com' });
+    mocks.verifyIdToken.mockResolvedValue({ uid: 'uid-1', email: 'ana@example.com', email_verified: true });
   });
   const patch = () => request(app).patch('/api/users/me').set('Authorization', 'Bearer test-token');
   it.each([{ nombre: ' Ana María ' }, { apellido: 'García' }, { avatarUrl: null }, { username: 'Ana-User2' }])('updates allowed partial input %j', async (input) => {
@@ -77,7 +77,7 @@ describe('PATCH /api/users/me', () => {
     const response = await patch().send(input);
     expect(response.status).toBe(200); expect(response.body).toEqual({ success: true, data });
     expect(response.headers['cache-control']).toBe('no-store');
-    expect(mocks.updateUserProfile).toHaveBeenCalledWith({ uid: 'uid-1', email: 'ana@example.com' }, 'nombre' in input ? { nombre: 'Ana María' } : input);
+    expect(mocks.updateUserProfile).toHaveBeenCalledWith({ uid: 'uid-1', email: 'ana@example.com', emailVerified: true }, 'nombre' in input ? { nombre: 'Ana María' } : input);
     if (!('avatarUrl' in input)) expect(mocks.updateUserProfile.mock.calls[0][1]).not.toHaveProperty('avatarUrl');
   });
   it.each([{}, { uid: 'other' }, { email: 'other@example.com' }, { createdAt: 'x' }, { updatedAt: 'x' }, { profileStatus: 'complete' }, { usernameKey: 'ana-user2' }, { other: 1 }, { nombre: ' ' }, { apellido: 4 }, { username: 'short' }, { avatarUrl: '' }, { avatarUrl: 'not-a-url' }, { avatarUrl: 'http://example.com' }])('rejects invalid input %j', async (input) => {
