@@ -2,6 +2,10 @@ node_modules/
 dist/
 build/
 coverage/
+# Archivos locales de pnpm.
+**/pnpm-lock.yaml
+**/pnpm-workspace.yaml
+.pnpm-store/
 # Variables de entorno locales: nunca se suben al repositorio.
 **/.env
 **/.env.*

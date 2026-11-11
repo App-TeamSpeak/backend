@@ -146,14 +146,24 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       await previous;
       try {
         if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
-        if (socket.data.roomId === roomId) { socket.emit('room:joined', { roomId }); ack?.({ ok: true }); return; }
+        if (socket.data.roomId === roomId) {
+          const participants = Array.from(io.sockets.adapter.rooms.get(roomId) ?? [])
+            .map(socketId => io.sockets.sockets.get(socketId)?.data.user?.uid)
+            .filter((uid): uid is string => Boolean(uid));
+          socket.emit('room:joined', { roomId, participants });
+          ack?.({ ok: true });
+          return;
+        }
         await leaveRoom(socket);
         if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
         await socket.join(roomId);
         if (!allowed()) { await socket.leave(roomId); report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
         socket.data.roomId = roomId;
         socket.to(roomId).emit('room:participant-joined', { userId: socket.data.user.uid });
-        socket.emit('room:joined', { roomId });
+        const participants = Array.from(io.sockets.adapter.rooms.get(roomId) ?? [])
+          .map(socketId => io.sockets.sockets.get(socketId)?.data.user?.uid)
+          .filter((uid): uid is string => Boolean(uid));
+        socket.emit('room:joined', { roomId, participants });
         ack?.({ ok: true });
       } finally { release(); }
     });
