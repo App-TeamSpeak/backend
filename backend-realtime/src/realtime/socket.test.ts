@@ -80,15 +80,21 @@ it('prevents a concurrent authorization from continuing after another detects th
   expect(value.received.some(([event]) => event === 'chat:message')).toBe(false);
 });
 it('moves between rooms and cleans membership on disconnect without authorization', async () => {
-  const value = await connected(); await value.request('room:join', { roomId: 'first' });
+  const value = await connected(); const observer = await connected('observer');
+  await value.request('room:join', { roomId: 'first' });
   await value.request('room:join', { roomId: 'second' });
-  expect(io.sockets.adapter.rooms.has('first')).toBe(false); expect(io.sockets.adapter.rooms.get('second')?.size).toBe(1);
+  await observer.request('room:join', { roomId: 'second' });
+  expect(value.received.filter(([event]) => event === 'room:joined').at(-1)?.[1]).toMatchObject({ roomId: 'second', participants: ['user'] });
+  expect(observer.received.filter(([event]) => event === 'room:joined').at(-1)?.[1]).toMatchObject({ roomId: 'second', participants: ['user', 'observer'] });
+  expect(io.sockets.adapter.rooms.has('first')).toBe(false); expect(io.sockets.adapter.rooms.get('second')?.size).toBe(2);
   await value.request('room:join', { roomId: 'second' });
   mocks.requireActiveAccount.mockRejectedValue(new Error('unavailable'));
   const serverSocket = [...io.sockets.sockets.values()][0];
   const disconnected = new Promise<void>((resolve) => serverSocket.once('disconnect', () => resolve()));
   await value.close(); await disconnected;
-  expect(io.sockets.adapter.rooms.has('second')).toBe(false);
+  expect(io.sockets.adapter.rooms.get('second')?.size).toBe(1);
+  await observer.close();
+  await vi.waitFor(() => expect(io.sockets.adapter.rooms.has('second')).toBe(false));
 });
 it.each([null, undefined, 12, 'text', [], {}, { roomId: 2 }, { roomId: ' ' }])('handles invalid room payload %j', async (payload) => {
   const value = await connected();
