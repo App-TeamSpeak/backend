@@ -15,7 +15,7 @@ const signatureKeys = ['NODE_ENV', 'FIREBASE_PROJECT_ID', 'FIREBASE_EXPECTED_PRO
   'GOOGLE_APPLICATION_CREDENTIALS', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY', 'FIREBASE_CONFIG', 'FIREBASE_TOKEN'];
 function localPort(host: string | undefined): number | undefined {
   const match = /^127\.0\.0\.1:([1-9][0-9]*)$/.exec(host ?? '');
-  const port = match ? Number(match[1]) : NaN;
+  const port = match ? Number(match[1]) : Number.NaN;
   return Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : undefined;
 }
 class EmulatorCredential {

@@ -94,3 +94,13 @@ describe('destructive processor client provenance (no remote requests)', () => {
   });
 
 });
+
+it('returns the processing result after closing its dedicated Firebase application', async () => {
+  const before = getApps().map((app) => app.name);
+  const result = await withDeletionEmulatorClients(async ({ assertSafe }) => {
+    assertSafe();
+    return { status: 'controlled-success' };
+  });
+  expect(result).toEqual({ status: 'controlled-success' });
+  expect(getApps().map((app) => app.name)).toEqual(before);
+});

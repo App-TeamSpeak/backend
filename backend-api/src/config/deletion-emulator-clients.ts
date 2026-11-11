@@ -22,6 +22,8 @@ export async function withDeletionEmulatorClients<T>(operation: (clients: Deleti
   }, `deletion-emulator-${randomUUID()}`);
   let firestore: Firestore | undefined;
   let processingFailed = false;
+  let cleanupFailed = false;
+  let result: T;
   try {
     // The installed Admin Firestore factory does not support custom local credentials.
     // Use the supported Firestore constructor with an explicit insecure local endpoint.
@@ -38,17 +40,15 @@ export async function withDeletionEmulatorClients<T>(operation: (clients: Deleti
       }
     };
     assertSafe();
-    return await operation({ firestore, auth, assertSafe });
+    result = await operation({ firestore, auth, assertSafe });
   } catch (error) {
     processingFailed = true;
     throw error;
   } finally {
-    let cleanupFailed = false;
     try { await firestore?.terminate(); } catch { cleanupFailed = true; }
     try { await deleteApp(app); } catch { cleanupFailed = true; }
-    if (cleanupFailed) {
-      if (processingFailed) console.error({ event: 'deletion_clients_cleanup_failed', code: 'DELETION_CLIENT_CLEANUP_FAILED' });
-      else throw new AppError(500, 'DELETION_CLIENT_CLEANUP_FAILED', 'No se pudieron cerrar los clientes de prueba.');
-    }
+    if (cleanupFailed && processingFailed) console.error({ event: 'deletion_clients_cleanup_failed', code: 'DELETION_CLIENT_CLEANUP_FAILED' });
   }
+  if (cleanupFailed) throw new AppError(500, 'DELETION_CLIENT_CLEANUP_FAILED', 'No se pudieron cerrar los clientes de prueba.');
+  return result;
 }

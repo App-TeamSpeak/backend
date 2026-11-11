@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { createServer, type Server as HttpServer } from 'node:http';
 import { TestSocketClient } from './socket-client';
 import http from 'node:http';
@@ -57,9 +58,10 @@ it('builds stable owned clients for the exact demo project', () => {
   expect('projectId' in db && db.projectId).toBe(project); expect(firebase.getFirebaseInfo()).toEqual(auth); expect(firebase.getFirestoreDb()).toBe(db);
 });
 it('verifies an emitted fixture ID token through the unchanged auth service', async () => {
-  await getAuth(fixtureApp!).createUser({ uid: 'rt-fixture', email: 'rt-fixture@example.com', password: 'Emulator-Only1!' });
+  const password = `${randomUUID()}aA1!`;
+  await getAuth(fixtureApp!).createUser({ uid: 'rt-fixture', email: 'rt-fixture@example.com', password });
   const response = await fetch(`${authOrigin}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=emulator-only`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'rt-fixture@example.com', password: 'Emulator-Only1!', returnSecureToken: true }), signal: AbortSignal.timeout(5000),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'rt-fixture@example.com', password, returnSecureToken: true }), signal: AbortSignal.timeout(5000),
   });
   expect(response.ok).toBe(true); const data = await response.json() as { idToken: string };
   const { verifyToken } = await import('../services/firebase-auth.service.js'); expect((await verifyToken(data.idToken)).uid).toBe('rt-fixture');
@@ -103,10 +105,11 @@ it('blocks remote test transports locally before transmission', () => {
 
 async function fixtureToken(uid: string): Promise<string> {
   const email = `${uid}@example.com`;
-  await getAuth(fixtureApp!).createUser({ uid, email, password: 'Emulator-Only1!' });
+  const password = `${randomUUID()}aA1!`;
+  await getAuth(fixtureApp!).createUser({ uid, email, password });
   const response = await fetch(`${authOrigin}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=emulator-only`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: 'Emulator-Only1!', returnSecureToken: true }), signal: AbortSignal.timeout(5000),
+    body: JSON.stringify({ email, password, returnSecureToken: true }), signal: AbortSignal.timeout(5000),
   });
   if (!response.ok) throw new Error('Unable to sign in local fixture');
   return (await response.json() as { idToken: string }).idToken;

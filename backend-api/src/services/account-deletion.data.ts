@@ -59,5 +59,5 @@ export async function readDeletionResources(tx: Transaction, firestore: Firestor
     }
     if (key && assertOwnedReservation(await tx.get(usernames.doc(key)), key, uid)) keys.add(key);
   }
-  return { profileRef, profileExists: profile.exists, usernameKeys: [...keys].sort() };
+  return { profileRef, profileExists: profile.exists, usernameKeys: [...keys].sort((left, right) => left < right ? -1 : left > right ? 1 : 0) };
 }

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deleteApp } from 'firebase-admin/app';
@@ -23,9 +24,10 @@ async function snapshot() {
 }
 async function token(uid = identity.uid) {
   const email = `${uid}@example.com`;
-  await auth.createUser({ uid, email, password: 'Emulator-Only1!' });
+  const password = `${randomUUID()}aA1!`;
+  await auth.createUser({ uid, email, password });
   const response = await fetch(`${authOrigin}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=emulator-only`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: 'Emulator-Only1!', returnSecureToken: true }), signal: AbortSignal.timeout(5000),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password, returnSecureToken: true }), signal: AbortSignal.timeout(5000),
   });
   if (!response.ok) throw new Error('Unable to obtain an emulator token.');
   const data = await response.json() as { idToken: string };
@@ -55,7 +57,7 @@ describe('DELETE intent with real Authentication and Firestore emulators', () =>
     const after = await snapshot(); expect(after.users).toEqual(before.users); expect(after.usernames).toEqual(before.usernames);
     expect(after.markers).toHaveLength(1);
     expect(after.markers[0]).toMatchObject({ id: identity.uid, status: 'pending', phase: 'auth', usernameKeys: ['ana-user1'], attempts: 0 });
-    expect(Object.keys(after.markers[0]).sort()).toEqual(['id','status','phase','usernameKeys','attempts','requestedAt','updatedAt'].sort());
+    expect(Object.keys(after.markers[0]).sort((left, right) => left < right ? -1 : left > right ? 1 : 0)).toEqual(['id','status','phase','usernameKeys','attempts','requestedAt','updatedAt'].sort((left, right) => left < right ? -1 : left > right ? 1 : 0));
     expect((await db.doc(`accountDeletions/${identity.uid}`).get()).data()?.requestedAt).toBeInstanceOf(Timestamp);
     expect((await auth.getUser(identity.uid)).uid).toBe(identity.uid);
     expect((await request(app).get('/api/users/me').set('Authorization', `Bearer ${idToken}`)).status).toBe(403);
@@ -86,7 +88,7 @@ describe('DELETE intent with real Authentication and Firestore emulators', () =>
     if (change.status === 'rejected') expect(change.reason).toMatchObject({ statusCode: 403, code: 'ACCOUNT_DELETION_PENDING' });
     const owned = await db.collection('usernames').where('uid','==',identity.uid).get();
     const marker = (await db.doc(`accountDeletions/${identity.uid}`).get()).data();
-    expect(marker?.usernameKeys).toEqual(owned.docs.map((doc) => doc.id).sort());
+    expect(marker?.usernameKeys).toEqual(owned.docs.map((doc) => doc.id).sort((left, right) => left < right ? -1 : left > right ? 1 : 0));
     const stable = await snapshot();
     await expect(updateUserProfile(identity, { nombre: 'No permitido' }, db)).rejects.toMatchObject({ statusCode: 403 });
     await expect(createUserProfile(identity, body, db)).rejects.toMatchObject({ statusCode: 403 });

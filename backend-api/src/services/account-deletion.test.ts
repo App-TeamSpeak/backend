@@ -146,3 +146,13 @@ describe('initial intent integrity and idempotency', () => {
   });
 
 });
+
+it('persists all owned keys in deterministic code-unit order regardless of query order', async () => {
+  for (const key of ['zzzzzzzz', 'aaaa_aaa', 'aaaa-aaa']) {
+    fake.data.set(`usernames/${key}`, { uid, usernameKey: key });
+  }
+  await beginAccountDeletion({ uid, authTime: seconds }, fake.db);
+  expect(fake.data.get(`accountDeletions/${uid}`)?.usernameKeys)
+    .toEqual(['aaaa-aaa', 'aaaa_aaa', 'ana-user1', 'zzzzzzzz']);
+  expect(fake.create).toHaveBeenCalledOnce();
+});
