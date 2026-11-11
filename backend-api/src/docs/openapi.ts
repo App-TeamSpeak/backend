@@ -1,9 +1,28 @@
+const userInputProperties = {
+          nombre: { type: 'string', description: 'Se recortan espacios exteriores. El valor recortado debe tener 1–100 caracteres y no estar vacío.' },
+          apellido: { type: 'string', description: 'Se recortan espacios exteriores; el valor resultante debe tener 1–100 caracteres y no estar vacío.' },
+          username: { type: 'string', pattern: '^\\s*[A-Za-z0-9_-]{8,30}\\s*$', description: 'Se recortan espacios exteriores; letras ASCII, números, - y _. Conserva mayúsculas para mostrar; unicidad sin distinguir mayúsculas mediante usernameKey.' },
+          avatarUrl: { type: 'string', nullable: true, description: 'URL HTTPS válida después de recortar espacios exteriores, máximo 2048 caracteres normalizados.' },
+        } as const;
+
+const userProfileSchema = {
+        type: 'object', required: ['uid', 'email', 'nombre', 'apellido', 'username', 'usernameKey', 'avatarUrl', 'profileStatus', 'createdAt', 'updatedAt'],
+        properties: {
+          uid: { type: 'string' }, email: { type: 'string', format: 'email' },
+          nombre: { type: 'string' }, apellido: { type: 'string' },
+          username: { type: 'string' }, usernameKey: { type: 'string' },
+          avatarUrl: { type: 'string', nullable: true, format: 'uri' },
+          profileStatus: { type: 'string', enum: ['complete'] },
+          createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' },
+        },
+      } as const;
+
 export const openapi = {
   openapi: '3.0.3',
   info: {
     title: 'TeamSpeak Study Room API',
     version: '0.1.0',
-    description: 'API REST para autenticación, perfiles, salas de estudio y mensajes persistentes.',
+    description: 'API REST para autenticación, perfiles, salas de estudio y mensajes persistentes. Identidad autenticada no implica cuenta activa ni perfil completo: las rutas privadas rechazan cualquier marcador accountDeletions del UID, incluso completado o bloqueado. La eliminación real aún no está implementada; DELETE solo puede registrar intenciones en pruebas explícitamente aisladas.',
   },
   servers: [{ url: '/', description: 'Servidor actual' }],
   tags: [
@@ -24,7 +43,27 @@ export const openapi = {
         properties: {
           success: { type: 'boolean', example: false },
           code: { type: 'string', example: 'AUTH_REQUIRED' },
+          details: { type: 'array', items: { type: 'object' }, description: 'Detalles de validación cuando corresponde.' },
           message: { type: 'string', example: 'Se requiere un token Bearer válido.' },
+        },
+      },
+      UserInput: {
+        type: 'object', additionalProperties: false, required: ['nombre', 'apellido', 'username'],
+        properties: userInputProperties,
+      },
+      UserPatch: { type: 'object', additionalProperties: false, minProperties: 1, properties: userInputProperties },
+      UserProfile: userProfileSchema,
+      UserResponse: {
+        type: 'object', required: ['success', 'data'],
+        properties: {
+          success: { type: 'boolean', enum: [true] },
+          data: {
+            type: 'object', required: ['uid', 'profileStatus', 'profile'],
+            properties: {
+              uid: { type: 'string' }, profileStatus: { type: 'string', enum: ['complete', 'incomplete'] },
+              profile: { ...userProfileSchema, nullable: true, description: 'null si no existe un perfil completo recuperable; documentos inconsistentes producen 409.' },
+            },
+          },
         },
       },
       Room: {
@@ -78,23 +117,70 @@ export const openapi = {
     },
     '/api/users/me': {
       get: {
-        tags: ['Users'],
-        security: [{ bearerAuth: [] }],
-        summary: 'Obtiene el perfil autenticado',
-        responses: { 501: { description: 'Ruta preparada; persistencia pendiente' }, 401: { description: 'No autenticado' } },
+        tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Consulta el perfil de la identidad autenticada',
+        description: '200 con profileStatus incomplete y profile null si falta un perfil completo. No implica token inválido. Cache-Control: no-store.',
+        responses: {
+          403: { description: 'ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          200: { description: 'Estado del perfil', content: { 'application/json': { schema: { $ref: '#/components/schemas/UserResponse' } } } },
+          401: { description: 'AUTH_REQUIRED o AUTH_INVALID', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          409: { description: 'PROFILE_INCONSISTENT', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          500: { description: 'INTERNAL_ERROR', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          503: { description: 'AUTH_UNAVAILABLE o FIRESTORE_UNAVAILABLE', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+      post: {
+        tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Crea el perfil y reserva el username atómicamente',
+        description: 'UID y email proceden del token Firebase. Si avatarUrl se omite al crear el perfil, se almacena null. Reintentos con los mismos datos normalizados devuelven 200 sin escrituras. Completa perfiles recuperables sin reemplazar campos existentes; responde 200 en recuperación. No actualiza perfiles completos. Cache-Control: no-store.',
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/UserInput' } } } },
+        responses: {
+          403: { description: 'ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          201: { description: 'Perfil creado', content: { 'application/json': { schema: { $ref: '#/components/schemas/UserResponse' } } } },
+          200: { description: 'Reintento idempotente o perfil incompleto recuperado', content: { 'application/json': { schema: { $ref: '#/components/schemas/UserResponse' } } } },
+          400: { description: 'VALIDATION_ERROR, INVALID_JSON o AUTH_EMAIL_REQUIRED', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: 'AUTH_REQUIRED o AUTH_INVALID', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          409: { description: 'USERNAME_TAKEN, PROFILE_ALREADY_EXISTS o PROFILE_INCONSISTENT', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          500: { description: 'INTERNAL_ERROR', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          503: { description: 'AUTH_UNAVAILABLE o FIRESTORE_UNAVAILABLE', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
       },
       patch: {
-        tags: ['Users'],
-        security: [{ bearerAuth: [] }],
-        summary: 'Actualiza el perfil autenticado',
-        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' } } } },
-        responses: { 501: { description: 'Ruta preparada; persistencia pendiente' }, 401: { description: 'No autenticado' } },
+        tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Actualiza parcialmente el perfil autenticado',
+        description: 'Solo nombre, apellido, username y avatarUrl. Campos omitidos se conservan; omitir avatarUrl conserva el avatar actual y avatarUrl null lo elimina. El cambio de username mueve la reserva atómicamente. Mayúsculas solo cambian presentación. Valores equivalentes tras normalizar no generan escrituras ni cambian updatedAt. Requiere perfil completo y reserva consistente. Cache-Control: no-store.',
+        requestBody: {
+          required: true, content: { 'application/json': {
+            schema: { $ref: '#/components/schemas/UserPatch' },
+            examples: {
+              nombre: { value: { nombre: 'Ana María' } },
+              varios: { value: { nombre: 'Ana María', apellido: 'Pérez', username: 'Ana-User2', avatarUrl: null } },
+              quitarAvatar: { value: { avatarUrl: null } },
+            },
+          } },
+        },
+        responses: {
+          403: { description: 'ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          200: { description: 'Perfil actualizado o repetición sin cambios', content: { 'application/json': { schema: { $ref: '#/components/schemas/UserResponse' } } } },
+          400: { description: 'VALIDATION_ERROR o INVALID_JSON', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: 'AUTH_REQUIRED o AUTH_INVALID', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          404: { description: 'PROFILE_NOT_FOUND: completar registro mediante POST', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          409: { description: 'USERNAME_TAKEN, PROFILE_INCOMPLETE o PROFILE_INCONSISTENT', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          500: { description: 'INTERNAL_ERROR', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          503: { description: 'AUTH_UNAVAILABLE o FIRESTORE_UNAVAILABLE', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
       },
       delete: {
-        tags: ['Users'],
-        security: [{ bearerAuth: [] }],
-        summary: 'Elimina la cuenta autenticada',
-        responses: { 501: { description: 'Ruta preparada; eliminación pendiente' }, 401: { description: 'No autenticado' } },
+        tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Inicio de eliminación provisional, solo en pruebas aisladas',
+        description: 'Deshabilitado públicamente: 501. Solo se habilita con NODE_ENV=test, proyecto demo-teamspeak-tests, ambos emuladores locales y activación explícita de la suite. No admite cuerpo. Verifica revocación con Firebase Admin; una intención nueva requiere auth_time entero, no futuro y de máximo 300 segundos. Una intención pending válida puede repetirse con identidad vigente sin reiniciar progreso ni exigir de nuevo autenticación reciente. 202 solo significa intención persistida; NO elimina identidad, perfil o reservas. Estados blocked/completed/malformados no se reinician. US-05 deberá reautenticar mediante credencial de correo/contraseña o proveedor Google y obtener un token actualizado. TS-01.4C/4D siguen pendientes.',
+        responses: {
+          202: { description: 'Intención pending creada o reutilizada; eliminación no completada', content: { 'application/json': { schema: {
+            type: 'object', required: ['success', 'data'], properties: { success: { type: 'boolean', enum: [true] }, data: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['pending'] } } } },
+          }, example: { success: true, data: { status: 'pending' } } } } },
+          400: { description: 'VALIDATION_ERROR (cuerpo no permitido) o INVALID_JSON' },
+          401: { description: 'AUTH_REQUIRED, AUTH_INVALID, AUTH_EXPIRED, AUTH_REVOKED, AUTH_USER_DISABLED, AUTH_USER_DELETED o AUTH_RECENT_REQUIRED' },
+          409: { description: 'PROFILE_INCONSISTENT, ACCOUNT_DELETION_BLOCKED, ACCOUNT_DELETED o ACCOUNT_DELETION_INCONSISTENT' },
+          501: { description: 'NOT_IMPLEMENTED: endpoint deshabilitado fuera de pruebas aisladas' },
+          503: { description: 'AUTH_UNAVAILABLE o FIRESTORE_UNAVAILABLE' },
+          500: { description: 'INTERNAL_ERROR' },
+        },
       },
     },
     '/api/rooms': {
@@ -102,28 +188,36 @@ export const openapi = {
         tags: ['Rooms'],
         security: [{ bearerAuth: [] }],
         summary: 'Lista las salas del usuario',
-        responses: { 501: { description: 'Ruta preparada; Firestore pendiente' }, 401: { description: 'No autenticado' } },
+        responses: {
+          403: { description: 'ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada; Firestore pendiente' }, 401: { description: 'No autenticado' } },
       },
       post: {
         tags: ['Rooms'],
         security: [{ bearerAuth: [] }],
         summary: 'Crea una sala de estudio',
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string', minLength: 1, maxLength: 80 } } } } } },
-        responses: { 201: { description: 'Sala creada' }, 400: { description: 'Datos inválidos' }, 501: { description: 'Ruta preparada; Firestore pendiente' } },
+        responses: {
+          403: { description: 'ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 201: { description: 'Sala creada' }, 400: { description: 'Datos inválidos' }, 501: { description: 'Ruta preparada; Firestore pendiente' } },
       },
     },
     '/api/rooms/{roomId}': {
       parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }],
-      get: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Obtiene una sala', responses: { 501: { description: 'Ruta preparada' } } },
-      patch: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Edita una sala propia', responses: { 501: { description: 'Ruta preparada' }, 403: { description: 'Sin permisos' } } },
-      delete: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Elimina una sala propia', responses: { 501: { description: 'Ruta preparada' }, 403: { description: 'Sin permisos' } } },
+      get: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Obtiene una sala', responses: {
+          403: { description: 'ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' } } },
+      patch: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Edita una sala propia', responses: {
+          403: { description: 'Sin permisos o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' } } },
+      delete: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Elimina una sala propia', responses: {
+          403: { description: 'Sin permisos o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' } } },
     },
     '/api/rooms/{roomId}/join': {
-      post: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Se une a una sala', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: { 501: { description: 'Ruta preparada' }, 404: { description: 'Sala no encontrada' } } },
+      post: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Se une a una sala', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: {
+          403: { description: 'ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' }, 404: { description: 'Sala no encontrada' } } },
     },
     '/api/rooms/{roomId}/messages': {
-      get: { tags: ['Messages'], security: [{ bearerAuth: [] }], summary: 'Obtiene el historial de chat', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: { 501: { description: 'Ruta preparada; Firestore pendiente' } } },
-      post: { tags: ['Messages'], security: [{ bearerAuth: [] }], summary: 'Guarda un mensaje', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: { 501: { description: 'Ruta preparada; Firestore pendiente' } } },
+      get: { tags: ['Messages'], security: [{ bearerAuth: [] }], summary: 'Obtiene el historial de chat', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: {
+          403: { description: 'ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada; Firestore pendiente' } } },
+      post: { tags: ['Messages'], security: [{ bearerAuth: [] }], summary: 'Guarda un mensaje', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: {
+          403: { description: 'ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada; Firestore pendiente' } } },
     },
   },
 } as const;

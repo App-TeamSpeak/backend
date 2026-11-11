@@ -6,7 +6,11 @@ export interface UserDocument {
   apellido: string;
   email: string;
   username: string;
-  avatarUrl: string;
+  avatarUrl: string | null;
+  usernameKey: string;
+  profileStatus: 'complete';
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
 }
 
 export interface UsernameDocument {
@@ -34,4 +38,18 @@ export interface MessageDocument {
   senderId: string;
   text: string;
   createdAt: Timestamp;
+}
+
+
+// The document ID is the authenticated UID; no credentials or profile copies.
+export interface AccountDeletionDocument {
+  status: 'pending' | 'completed' | 'blocked';
+  phase: 'auth' | 'firestore' | 'done';
+  usernameKeys: string[];
+  requestedAt: Timestamp;
+  updatedAt: Timestamp;
+  completedAt?: Timestamp;
+  attempts: number;
+  nextAttemptAt?: Timestamp;
+  lastErrorCode?: string;
 }

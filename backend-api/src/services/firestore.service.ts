@@ -1,12 +1,14 @@
 import { FieldPath, type CollectionReference, type Firestore } from 'firebase-admin/firestore';
+import { AppError } from '../middleware/errors';
 import { getFirestoreDb } from '../config/firebase';
-import type { MemberDocument, MessageDocument, RoomDocument, UserDocument, UsernameDocument } from './firestore.documents';
+import type { AccountDeletionDocument, MemberDocument, MessageDocument, RoomDocument, UserDocument, UsernameDocument } from './firestore.documents';
 
 export function getFirestoreCollections(firestore: Firestore = getFirestoreDb()) {
   return {
     users: firestore.collection('users') as CollectionReference<UserDocument>,
     usernames: firestore.collection('usernames') as CollectionReference<UsernameDocument>,
     rooms: firestore.collection('rooms') as CollectionReference<RoomDocument>,
+    accountDeletions: firestore.collection('accountDeletions') as CollectionReference<AccountDeletionDocument>,
   };
 }
 
@@ -27,4 +29,17 @@ export async function getSprint0DemoDocument(
 ): Promise<Record<string, unknown> | null> {
   const snapshot = await firestore.collection('sprint_prueba').doc('verificacion_sprint0').get();
   return snapshot.exists ? (snapshot.data() as Record<string, unknown>) : null;
+}
+
+export async function withFirestore<T>(operation: (db: Firestore) => Promise<T>, db?: Firestore): Promise<T> {
+  try {
+    return await operation(db ?? getFirestoreDb());
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+    if (new Set<unknown>([4, 8, 10, 14, 'deadline-exceeded', 'resource-exhausted', 'aborted', 'unavailable']).has(code)) {
+      throw new AppError(503, 'FIRESTORE_UNAVAILABLE', 'Firestore no está disponible.');
+    }
+    throw new AppError(500, 'INTERNAL_ERROR', 'Ocurrió un error interno.');
+  }
 }

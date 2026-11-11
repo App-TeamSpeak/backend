@@ -32,10 +32,11 @@ describe('Firestore service', () => {
     const { firestore } = makeFirestore();
     const collections = getFirestoreCollections(firestore as never);
 
-    expect(Object.keys(collections)).toEqual(['users', 'usernames', 'rooms']);
+    expect(Object.keys(collections)).toEqual(['users', 'usernames', 'rooms', 'accountDeletions']);
     expect(firestore.collection).toHaveBeenCalledWith('users');
     expect(firestore.collection).toHaveBeenCalledWith('usernames');
     expect(firestore.collection).toHaveBeenCalledWith('rooms');
+    expect(firestore.collection).toHaveBeenCalledWith('accountDeletions');
   });
 
   it('exposes typed room subcollections', () => {
