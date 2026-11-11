@@ -86,3 +86,37 @@ it('reads only marker existence and rejects a read completed after closure', asy
   const reading = f.hasAccountDeletion('fixture'); await f.closeFirebase(); complete({ exists: false });
   await expect(reading).rejects.toMatchObject({ code: 'FIREBASE_CLIENTS_CLOSED' });
 });
+it('owns marker subscriptions, suppresses late callbacks and closes them before Firestore', async () => {
+  let changed!: (snapshot: { exists: boolean }) => void; const stop = vi.fn();
+  sdk.Firestore.mockImplementation(function () { return { terminate: sdk.terminate, collection: () => ({ doc: () => ({
+    onSnapshot: (next: typeof changed) => { changed = next; return stop; },
+  }) }) }; });
+  const f = await load(); const next = vi.fn(); const failed = vi.fn();
+  const cancel = f.watchAccountDeletion('fixture', next, failed);
+  changed({ exists: false }); expect(next).toHaveBeenCalledExactlyOnceWith(false);
+  cancel(); cancel(); changed({ exists: true }); expect(next).toHaveBeenCalledTimes(1);
+  expect(stop).toHaveBeenCalledOnce();
+  f.watchAccountDeletion('fixture', next, failed);
+  sdk.terminate.mockImplementation(async () => { expect(stop).toHaveBeenCalledTimes(2); });
+  await f.closeFirebase(); expect(failed).toHaveBeenCalledWith(expect.objectContaining({ code: 'FIREBASE_CLIENTS_CLOSED' }));
+});
+it('rejects subscription callbacks after environment changes without revealing snapshot contents', async () => {
+  let changed!: (snapshot: { exists: boolean }) => void; const stop = vi.fn();
+  sdk.Firestore.mockImplementation(function () { return { terminate: sdk.terminate, collection: () => ({ doc: () => ({
+    onSnapshot: (next: typeof changed) => { changed = next; return stop; },
+  }) }) }; });
+  const f = await load(); const next = vi.fn(); const failed = vi.fn();
+  f.watchAccountDeletion('fixture', next, failed);
+  vi.stubEnv('FIRESTORE_EMULATOR_HOST', '127.0.0.1:8082'); changed({ exists: false });
+  expect(next).not.toHaveBeenCalled(); expect(failed).toHaveBeenCalledWith(expect.objectContaining({ code: 'FIREBASE_CONFIGURATION_CHANGED' }));
+  expect(stop).toHaveBeenCalledOnce(); await f.closeFirebase();
+});
+it('sanitizes a subscription construction failure and leaves no owned registration behind', async () => {
+  sdk.Firestore.mockImplementation(function () { return { terminate: sdk.terminate, collection: () => ({ doc: () => ({
+    onSnapshot: () => { throw new Error('PRIVATE'); },
+  }) }) }; });
+  const f = await load(); const failed = vi.fn();
+  const cancel = f.watchAccountDeletion('fixture', vi.fn(), failed); cancel();
+  expect(failed).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ code: 'FIREBASE_OBSERVER_FAILED' }));
+  await f.closeFirebase(); expect(failed).toHaveBeenCalledOnce();
+});

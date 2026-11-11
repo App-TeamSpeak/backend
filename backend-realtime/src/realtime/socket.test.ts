@@ -1,8 +1,12 @@
 import { createServer, type Server } from 'node:http';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ verifyToken: vi.fn(), requireActiveAccount: vi.fn(), startAccountAuthorization: vi.fn() }));
+const mocks = vi.hoisted(() => ({ verifyToken: vi.fn(), requireActiveAccount: vi.fn(), startAccountAuthorization: vi.fn(), watchAccountDeletion: vi.fn() }));
 vi.mock('../services/firebase-auth.service', () => ({ verifyToken: mocks.verifyToken }));
 vi.mock('../services/account-state.service', async (original) => ({ ...await original<typeof import('../services/account-state.service')>(), requireActiveAccount: mocks.requireActiveAccount, startAccountAuthorization: mocks.startAccountAuthorization }));
+vi.mock('../config/firebase', async (original) => ({
+  ...await original<typeof import('../config/firebase')>(),
+  watchAccountDeletion: mocks.watchAccountDeletion,
+}));
 import { AccountAuthorizationError, withAuthorizationTimeout } from '../services/account-state.service';
 import { createRealtimeServer } from './socket';
 import { TestSocketClient } from '../integration/socket-client';
@@ -11,6 +15,7 @@ beforeEach(async () => {
   vi.resetAllMocks(); clients = [];
   mocks.verifyToken.mockImplementation(async (token) => ({ uid: token }));
   mocks.requireActiveAccount.mockResolvedValue(undefined);
+  mocks.watchAccountDeletion.mockImplementation((_uid, changed) => { queueMicrotask(() => changed(false)); return vi.fn(); });
   mocks.startAccountAuthorization.mockImplementation((uid) => {
     const authorized = mocks.requireActiveAccount(uid);
     return { authorized, settled: authorized.then(() => undefined, () => undefined) };
@@ -210,4 +215,58 @@ it('keeps stuck reads in the server budget across disconnects and recovers after
   raw.resolve(); await new Promise<void>((resolve) => setImmediate(resolve));
   mocks.startAccountAuthorization.mockImplementation(() => ({ authorized: Promise.resolve(), settled: Promise.resolve() }));
   expect(await fresh.request('media:state', {})).toEqual({ ok: true });
+});
+
+it('proactively disconnects all local sessions of one UID while preserving another user and room cleanup', async () => {
+  const observed = new Map<string, { changed: (exists: boolean) => void; stop: ReturnType<typeof vi.fn> }>();
+  mocks.watchAccountDeletion.mockImplementation((uid, changed) => {
+    const stop = vi.fn(); observed.set(uid, { changed, stop }); queueMicrotask(() => changed(false)); return stop;
+  });
+  const first = await connected('same'); const second = await connected('same'); const other = await connected('other');
+  expect(mocks.watchAccountDeletion).toHaveBeenCalledTimes(2);
+  for (const value of [first, second, other]) await value.request('room:join', { roomId: 'room' });
+  const a = first.wait('disconnect'); const b = second.wait('disconnect');
+  observed.get('same')!.changed(true); await Promise.all([a, b]);
+  expect(await other.request('room:join', { roomId: 'room' })).toEqual({ ok: true });
+  expect(io.sockets.adapter.rooms.get('room')?.size).toBe(1);
+  expect(observed.get('same')!.stop).toHaveBeenCalledOnce();
+  expect(observed.get('other')!.stop).not.toHaveBeenCalled();
+});
+it('observer denial discards an event still waiting on its SDK read', async () => {
+  let changed!: (exists: boolean) => void;
+  mocks.watchAccountDeletion.mockImplementation((_uid, callback) => { changed = callback; queueMicrotask(() => callback(false)); return vi.fn(); });
+  const actor = await connected(); await actor.request('room:join', { roomId: 'room' });
+  const read = deferred(); mocks.requireActiveAccount.mockReturnValueOnce(read.promise);
+  actor.send('chat:send', { text: 'late' });
+  await vi.waitFor(() => expect(mocks.startAccountAuthorization).toHaveBeenCalledTimes(2));
+  changed(true); await actor.wait('disconnect'); read.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(actor.received.filter(([event]) => event === 'chat:message')).toHaveLength(0);
+});
+it('rejects observer initialization failure before accepting the handshake', async () => {
+  mocks.watchAccountDeletion.mockImplementation(() => { throw new Error('PRIVATE'); });
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  expect(await client().wait('connect_error')).toMatchObject({ message: 'AUTHORIZATION_UNAVAILABLE' });
+  expect(io.sockets.sockets.size).toBe(0); error.mockRestore();
+});
+it('observer failure cannot free the shared budget of outstanding SDK reads', async () => {
+  const failed = new Map<string, (error: { code: string }) => void>();
+  mocks.watchAccountDeletion.mockImplementation((uid, changed, error) => {
+    failed.set(uid, error); queueMicrotask(() => changed(false)); return vi.fn();
+  });
+  const users = await Promise.all(Array.from({ length: 32 }, (_, n) => connected('observed-' + n)));
+  const raw = deferred();
+  mocks.startAccountAuthorization.mockImplementation(() => ({ authorized: raw.promise, settled: raw.promise.then(() => undefined, () => undefined) }));
+  for (const user of users) { user.send('media:state', {}); user.send('screen:state', {}); }
+  await vi.waitFor(() => expect(mocks.startAccountAuthorization).toHaveBeenCalledTimes(64));
+  const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const closed = users.map((user) => user.wait('disconnect'));
+  for (const error of failed.values()) error({ code: 'FIREBASE_OBSERVER_FAILED' });
+  await Promise.all(closed);
+  const fresh = await connected('fresh');
+  expect(await fresh.request('media:state', {})).toMatchObject({ error: { code: 'AUTHORIZATION_BUSY' } });
+  expect(mocks.startAccountAuthorization).toHaveBeenCalledTimes(64);
+  raw.resolve(); await new Promise<void>((resolve) => setImmediate(resolve));
+  mocks.startAccountAuthorization.mockImplementation(() => ({ authorized: Promise.resolve(), settled: Promise.resolve() }));
+  expect(await fresh.request('media:state', {})).toEqual({ ok: true }); log.mockRestore();
 });

@@ -345,3 +345,90 @@ Authentication/Firestore Emulator aprobadas (138 en total). Se conservan las
 instrucciones/líneas, 93,50 % de ramas y 93,93 % de funciones. socket.ts mantiene
 100 % de instrucciones/líneas y alcanza 91,46 % de ramas. Los emuladores se
 cerraron al finalizar.
+
+## TS-01.4D.3: supervisión local de cuentas conectadas
+
+Cada instancia Socket.IO crea un supervisor account-access con un Map local por
+UID. Mantiene como máximo una suscripción a accountDeletions/{uid}, compartida por
+sus sesiones y por registros todavía en handshake. Un segundo UID tiene su propia
+suscripción. No hay registro distribuido, Redis ni comunicación directa con API.
+
+El handshake conserva la comprobación Auth con revocación y la lectura existente.
+A continuación registra la sesión y espera el primer snapshot del observador
+(hasta cinco segundos adicionales). Solo un snapshot sin documento permite
+aceptar la conexión. El primer snapshot con marcador, un error de construcción,
+un error terminal o el timeout rechazan la conexión y limpian el registro.
+El tiempo máximo de las tres fases puede ser aproximadamente 15 segundos.
+Si el transporte se cierra durante la espera, se elimina la sesión provisional.
+
+watchAccountDeletion en el módulo Firebase valida configuración antes de crear
+la suscripción y en cada snapshot. Entrega únicamente existencia o un error
+controlado, nunca el snapshot, Auth o clientes arbitrarios. El listener se crea
+con el Firestore propio ya configurado. Cancelar es idempotente y bloquea callbacks
+posteriores; closeFirebase cancela primero todos sus listeners y después termina
+Firestore y elimina únicamente su aplicación. Los callbacks cancelados no
+reactivan generaciones posteriores.
+
+La existencia de cualquier marcador (incluido malformado, completed o desconocido)
+bloquea el UID. El supervisor marca todas sus sesiones como bloqueadas antes de
+desconectarlas. Las sesiones activas reciben error:message con ACCOUNT_UNAVAILABLE;
+los fallos de supervisión utilizan AUTHORIZATION_UNAVAILABLE. Los diagnósticos
+registran evento y código controlados, sin UID, tokens ni mensajes internos del
+SDK. No se reintenta indefinidamente un listener que notifica error terminal:
+una conexión nueva debe autenticarse y crear supervisión válida otra vez.
+
+Cada socket tiene una señal de cierre que retira su registro. Al desaparecer el
+último se cancela la suscripción y se elimina la entrada, sin caché permanente.
+La identidad de la entrada protege contra snapshots o errores tardíos del
+observador anterior. Cerrar el supervisor impide registros nuevos, bloquea las
+sesiones, las desconecta y cancela todas las suscripciones.
+
+Los ocho guards siguen consultando Firestore por evento. Además comprueban el
+bloqueo del supervisor y el estado de parada después de sus esperas, incluyendo
+joins asíncronos. La desconexión utiliza la limpieza interna de salas existente.
+Los límites 2/socket y 64/instancia no cambian: desconectar por marcador o error
+del observador no libera lecturas pendientes artificialmente. La suscripción es
+un recurso adicional por UID, separado del presupuesto de consultas de eventos.
+
+server.ts ahora expone createRealtimeRuntime(): construirlo crea HTTP/Socket.IO;
+importar el módulo no crea recursos ni instala señales. start() abre el listener.
+stop() devuelve una promesa compartida: detiene la admisión y actividad protegida,
+bloquea/desconecta sockets, cancela observadores, cierra Socket.IO/HTTP, da un
+plazo a las lecturas en vuelo y cierra los clientes Firebase propios.
+Cada fase de espera tiene un límite de cinco segundos; una lectura atascada
+genera diagnóstico y se intenta terminar Firebase sin resetear los contadores.
+El ejecutable instala SIGINT/SIGTERM solo al arrancar directamente y termina el
+proceso tras su parada, con código de error ante fallo de arranque/cierre.
+El código embebido debe manejar un rechazo de stop(); no se promete cancelación
+SDK efectiva ni terminación de recursos que ignoren su cierre.
+
+Limitaciones: onSnapshot no es una transacción con Socket.IO. Existe una ventana
+entre el commit y su detección; los eventos ya emitidos no se retiran. Durante
+particiones o reconexiones internas de Firestore no existe una latencia máxima
+estricta; un error terminal notificado sí provoca cierre de las sesiones.
+Cada instancia debe supervisar sus sockets: una desconexión local no desconecta
+por sí sola sesiones de otro proceso. La revocación Auth sigue comprobándose en
+handshake, no mediante una nueva supervisión continua de tokens.
+
+Las pruebas mantienen Node 24, el cliente WebSocket nativo y el launcher
+node scripts/firebase-integration.cjs. Las unitarias simulan snapshots para
+comprobar generaciones, primer estado, abortos, errores, cancelaciones y cierre.
+Las integraciones usan onSnapshot real de Firestore Emulator, identidades
+Authentication Emulator y solo demo-teamspeak-tests: crean marcadores persistidos
+y comprueban desconexión sin otro evento, dos sesiones del mismo UID, aislamiento
+de otro usuario y limpieza de salas. El caso anterior de creación del marcador
+tras handshake se adapta a esperar desconexión proactiva, en vez de exigir un
+acknowledgement de un evento enviado a una sesión que ahora puede estar cerrada.
+
+DELETE, el procesador y el conciliador permanecen sin cambios y sin habilitación
+pública. No se añadieron dependencias. Las observaciones P3 de diagnósticos Auth,
+restauración de transportes y pruebas de handlers pendientes siguen pendientes;
+la regresión del host Firestore conservado ya se incorporó en TS-01.4D.2.
+
+Resultado TS-01.4D.3 con Node 24.18.0/npm 11.16.0: lint, typecheck y build
+correctos; 142 pruebas unitarias/HTTP/transporte y 21 integraciones reales
+aprobadas (163 en total). Se conservan los 138 casos anteriores, con la adaptación
+del caso de desconexión ya descrita, y se añaden 25 casos. Cobertura global:
+97,26 % instrucciones/líneas, 89,88 % ramas y 92,98 % funciones. account-access.ts
+y socket.ts alcanzan 100 % de instrucciones/líneas. Los emuladores se cerraron
+al finalizar.

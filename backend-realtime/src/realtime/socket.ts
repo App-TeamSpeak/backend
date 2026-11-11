@@ -1,9 +1,17 @@
 import type { Server as HttpServer } from 'node:http';
 import { Server, type Socket } from 'socket.io';
+import { createAccountAccess } from './account-access';
 import { env } from '../config/env';
 import { FirebaseConfigurationError } from '../config/firebase';
 import { verifyToken } from '../services/firebase-auth.service';
 import { AccountAuthorizationError, requireActiveAccount, startAccountAuthorization, withAuthorizationTimeout } from '../services/account-state.service';
+
+const lifecycles = new WeakMap<Server, { stop(): void; drain(): Promise<void> }>();
+export function getRealtimeLifecycle(io: Server) {
+  const lifecycle = lifecycles.get(io);
+  if (!lifecycle) throw new Error('UNKNOWN_REALTIME_SERVER');
+  return lifecycle;
+}
 
 export const MAX_IN_FLIGHT_AUTHORIZATIONS_PER_SOCKET = 2;
 export const MAX_IN_FLIGHT_EVENT_AUTHORIZATIONS_PER_SERVER = 64;
@@ -33,9 +41,25 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
   const corsOrigin = env.CORS_ORIGINS.length ? env.CORS_ORIGINS : env.NODE_ENV === 'production' ? false : true;
   const io = new Server(httpServer, { cors: { origin: corsOrigin } });
 
+  const access = createAccountAccess();
+  let stopping = false;
+  const pendingReads = new Set<Promise<void>>();
+  lifecycles.set(io, { stop: () => { stopping = true; access.close(); }, drain: async () => { await Promise.all([...pendingReads]); } });
+  const close = io.close.bind(io);
+  io.close = ((callback?: (error?: Error) => void) => {
+    stopping = true; access.close();
+    return close(callback);
+  }) as typeof io.close;
+
   io.use(async (socket, next) => {
+    if (stopping) { next(new Error('AUTHORIZATION_UNAVAILABLE')); return; }
+    const abort = new AbortController();
+    const gone = () => abort.abort();
+    socket.conn.once('close', gone);
+    const disconnected = () => { gone(); socket.conn.off('close', gone); };
+    socket.once('disconnect', disconnected);
     const token = typeof socket.handshake.auth?.token === 'string' ? socket.handshake.auth.token : undefined;
-    const deny = (code: Code) => next(Object.assign(new Error(code), { data: { code } }));
+    const deny = (code: Code) => { gone(); socket.conn.off('close', gone); socket.off('disconnect', disconnected); next(Object.assign(new Error(code), { data: { code } })); };
     if (!token) { deny('AUTH_REQUIRED'); return; }
     try {
       // Never accept identity from the handshake payload itself.
@@ -47,6 +71,11 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       }
       await requireActiveAccount(user.uid);
       socket.data.user = user;
+      await access.attach(user.uid, {
+        block: (code) => { socket.data.accountAccessBlocked = true; socket.data.accountAccessCode = code; },
+        disconnect: () => { if (socket.connected) { socket.emit('error:message', { code: socket.data.accountAccessCode, message: 'La sesión ya no está autorizada.' }); socket.disconnect(true); } },
+      }, abort.signal);
+      if (stopping || abort.signal.aborted || socket.data.accountAccessBlocked) { deny(socket.data.accountAccessCode ?? 'AUTHORIZATION_UNAVAILABLE'); return; }
       next();
     } catch (error) { deny(codeFor(error)); }
   });
@@ -54,6 +83,7 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
   // Includes reads belonging to disconnected sockets until they actually settle.
   let serverInFlight = 0;
   io.on('connection', (socket) => {
+    if (stopping || socket.data.accountAccessBlocked) { socket.disconnect(true); return; }
     let inFlight = 0;
     let blocked = false;
     // One wrapper covers every application handler, including room:leave.
@@ -62,7 +92,7 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       socket.on(event, (...args: unknown[]) => {
         const last = args[args.length - 1];
         const ack = typeof last === 'function' ? last as Ack : undefined;
-        const allowed = () => socket.connected && !blocked;
+        const allowed = () => socket.connected && !blocked && !stopping && !socket.data.accountAccessBlocked;
         if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
         // Admission is synchronous, before starting the SDK read. No event queue.
         if (inFlight >= MAX_IN_FLIGHT_AUTHORIZATIONS_PER_SOCKET || serverInFlight >= MAX_IN_FLIGHT_EVENT_AUTHORIZATIONS_PER_SERVER) {
@@ -79,7 +109,8 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
           try {
             const operation = startAccountAuthorization(socket.data.user?.uid);
             // settled never rejects, and represents the read rather than Promise.race.
-            void operation.settled.then(() => { readSettled = true; release(); });
+            pendingReads.add(operation.settled);
+            void operation.settled.then(() => { pendingReads.delete(operation.settled); readSettled = true; release(); });
             await operation.authorized;
           }
           catch (error) {

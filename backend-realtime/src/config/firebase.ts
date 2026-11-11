@@ -27,6 +27,7 @@ let auth: Auth | undefined;
 let firestore: Firestore | undefined;
 let closing: Promise<void> | undefined;
 let closed = false;
+const markerObservers = new Set<(error?: FirebaseConfigurationError) => void>();
 function configuration() {
   if (closed) return reject('FIREBASE_CLIENTS_CLOSED');
   const optional = (value: string | undefined) => value && value.trim() ? value : undefined;
@@ -113,6 +114,33 @@ export async function hasAccountDeletion(uid: string): Promise<boolean> {
   return snapshot.exists;
 }
 
+// Controlled subscription: only existence and sanitized failure cross this boundary.
+export function watchAccountDeletion(uid: string, changed: (exists: boolean) => void, failed: (error: FirebaseConfigurationError) => void): () => void {
+  if (!uid || uid.length > 128 || uid.includes('/')) return reject('FIREBASE_INVALID_UID');
+  const db = getFirestoreDb();
+  let active = true;
+  let unsubscribe: (() => void) | undefined;
+  const stop = (error?: FirebaseConfigurationError) => {
+    if (!active) return;
+    active = false; markerObservers.delete(stop);
+    try { unsubscribe?.(); }
+    catch { console.error({ event: 'realtime_observer_cleanup_failed', code: 'FIREBASE_CLEANUP_FAILED' }); }
+    if (error) failed(error);
+  };
+  markerObservers.add(stop);
+  try {
+    unsubscribe = db.collection('accountDeletions').doc(uid).onSnapshot((snapshot) => {
+      if (!active) return;
+      try { configuration(); }
+      catch { stop(new FirebaseConfigurationError('FIREBASE_CONFIGURATION_CHANGED')); return; }
+      changed(snapshot.exists);
+    }, () => stop(new FirebaseConfigurationError('FIREBASE_OBSERVER_FAILED')));
+    // Covers synchronous callbacks from construction, including failure.
+    if (!active) unsubscribe();
+  } catch { stop(new FirebaseConfigurationError('FIREBASE_OBSERVER_FAILED')); }
+  return () => stop();
+}
+
 export async function initializeFirebase(): Promise<void> {
   try { getFirebaseAuth(); getFirestoreDb(); }
   catch (error) {
@@ -126,6 +154,9 @@ export function closeFirebase(): Promise<void> {
   closed = true;
   closing = (async () => {
     let failed = false;
+    for (const stop of [...markerObservers]) {
+      try { stop(new FirebaseConfigurationError('FIREBASE_CLIENTS_CLOSED')); } catch { failed = true; }
+    }
     try { await firestore?.terminate(); } catch { failed = true; }
     try {
       const registered = getApps().find((app) => app.name === realtimeFirebaseAppName);

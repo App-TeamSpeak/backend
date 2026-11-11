@@ -16,9 +16,21 @@ const firestoreOrigin = `http://${process.env.FIRESTORE_EMULATOR_HOST}`;
 const authOrigin = `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}`;
 let firebase: typeof import('../config/firebase');
 beforeAll(async () => {
+  const probe = async (name: string, url: string, headers?: Record<string, string>) => {
+    const started = performance.now();
+    console.log(JSON.stringify({ event: 'emulator_probe_start', emulator: name, time: new Date().toISOString() }));
+    try {
+      const response = await fetch(url, { headers, signal: AbortSignal.timeout(3000) });
+      console.log(JSON.stringify({ event: 'emulator_probe_response', emulator: name, status: response.status, elapsedMs: Math.round(performance.now() - started), time: new Date().toISOString() }));
+      return response;
+    } catch (error) {
+      console.log(JSON.stringify({ event: 'emulator_probe_error', emulator: name, code: error instanceof Error ? error.name : 'UNKNOWN', elapsedMs: Math.round(performance.now() - started), time: new Date().toISOString() }));
+      throw error;
+    }
+  };
   const probes = await Promise.all([
-    fetch(`${firestoreOrigin}/v1/projects/${project}/databases/(default)/documents/infrastructureTests?pageSize=1`, { headers: { Authorization: 'Bearer owner' }, signal: AbortSignal.timeout(3000) }),
-    fetch(`${authOrigin}/emulator/v1/projects/${project}/config`, { signal: AbortSignal.timeout(3000) }),
+    probe('firestore', `${firestoreOrigin}/v1/projects/${project}/databases/(default)/documents/infrastructureTests?pageSize=1`, { Authorization: 'Bearer owner' }),
+    probe('auth', `${authOrigin}/emulator/v1/projects/${project}/config`),
   ]);
   if (probes.some((response) => !response.ok)) throw new Error('Both local emulators must be available before SDK operations.');
 });
@@ -118,7 +130,7 @@ it('authorizes real Socket.IO events for an active fixture and isolates another 
   await first.request('chat:send', { text: 'fixture', uid: 'forged' });
   expect(await second.wait('chat:message')).toMatchObject({ authorId: 'rt-first', text: 'fixture' });
   await firebase.getFirestoreDb().doc('accountDeletions/rt-first').create({ status: 'pending' });
-  expect(await first.request('chat:send', { text: 'forbidden' })).toMatchObject({ ok: false, error: { code: 'ACCOUNT_UNAVAILABLE' } });
+  // Supervision now disconnects the idle session without requiring another event.
   await first.wait('disconnect');
   expect(await second.request('chat:send', { text: 'second still active' })).toEqual({ ok: true });
   expect(await socketClient(firstToken).wait('connect_error')).toMatchObject({ message: 'ACCOUNT_UNAVAILABLE' });
@@ -154,4 +166,26 @@ it('fails closed with a controlled error after Firebase configuration becomes st
   try { expect(await client.request('room:join', { roomId: 'forbidden' })).toMatchObject({ ok: false, error: { code: 'AUTHORIZATION_UNAVAILABLE' } }); }
   finally { process.env.FIRESTORE_EMULATOR_HOST = previous; }
   expect(transport!.sockets.adapter.rooms.has('forbidden')).toBe(false);
+});
+
+it('real snapshots disconnect two idle sessions of the UID, preserve another UID and clean memberships', async () => {
+  const token = await fixtureToken('rt-observed'); const otherToken = await fixtureToken('rt-unaffected');
+  await startTransport();
+  const first = socketClient(token); const second = socketClient(token); const other = socketClient(otherToken);
+  await Promise.all([first.wait('connect'), second.wait('connect'), other.wait('connect')]);
+  for (const client of [first, second, other]) await client.request('room:join', { roomId: 'observed-room' });
+  await firebase.getFirestoreDb().doc('accountDeletions/rt-observed').create({});
+  await Promise.all([first.wait('disconnect'), second.wait('disconnect')]);
+  expect(await other.request('room:join', { roomId: 'observed-room' })).toEqual({ ok: true });
+  expect(transport!.sockets.adapter.rooms.get('observed-room')?.size).toBe(1);
+  expect((await firebase.getFirestoreDb().doc('accountDeletions/rt-observed').get()).exists).toBe(true);
+  expect(await socketClient(token).wait('connect_error')).toMatchObject({ message: 'ACCOUNT_UNAVAILABLE' });
+});
+it('cancels a real observer after the last socket and creates a fresh one on reconnect', async () => {
+  const token = await fixtureToken('rt-generation'); await startTransport();
+  const first = socketClient(token); await first.wait('connect'); await first.close();
+  const next = socketClient(token); await next.wait('connect');
+  await firebase.getFirestoreDb().doc('accountDeletions/rt-generation').create({ status: 'completed' });
+  await next.wait('disconnect');
+  expect(transport!.sockets.sockets.size).toBe(0);
 });
