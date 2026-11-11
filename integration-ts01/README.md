@@ -170,3 +170,12 @@ pruebas realtime, los seis escenarios conjuntos y las once regresiones aisladas
 del lanzador aprobaron (572 en total). Lint, typecheck y build de ambos backends
 fueron correctos. El runner y la CLI terminaron correctamente, el padre validó
 el recibo de esta ejecución y eliminó su directorio privado al finalizar.
+
+## Evidencia adicional US-01
+
+La misma suite incorpora cuatro casos de registro manual desde Authentication
+Emulator mediante REST cliente: recorrido POST/GET y persistencia/idempotencia,
+aislación de identidades y campos protegidos, competencia concurrente por username
+y rechazo de correo duplicado. Se conservan los seis escenarios TS-01 anteriores;
+el lanzador ejecuta diez casos en total. No se modifican contratos ni servicios.
+Consulte `../docs/us-01-backend.md` para la matriz y decisiones funcionales pendientes.

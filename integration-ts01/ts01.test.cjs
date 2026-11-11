@@ -210,3 +210,101 @@ test('shutdown with an active observed socket is idempotent and leaves API indep
   assert.equal(realtime.httpServer.listening, false);
   assert.equal((await http('GET', user.token)).status, 200);
 });
+
+// US-01 uses the client Authentication endpoint: Admin never creates these identities.
+async function manualSignup(email) {
+  net.assertSafe();
+  const response = await fetch(authOrigin + '/identitytoolkit.googleapis.com/v1/accounts:signUp?key=emulator-only', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password: require('node:crypto').randomUUID() + 'aA1!', returnSecureToken: true }),
+    signal: AbortSignal.timeout(5000),
+  });
+  return { status: response.status, data: await response.json() };
+}
+async function registeredIdentity(suffix) {
+  const email = prefix + '-' + suffix + '@example.invalid';
+  const result = await manualSignup(email);
+  assert.equal(result.status, 200);
+  const { localId: uid, idToken: token } = result.data;
+  const decoded = await auth.verifyIdToken(token, true);
+  assert.equal(decoded.uid, uid); assert.equal(decoded.email, email);
+  return { uid, token, email, username: 'Manual_' + require('node:crypto').randomUUID().slice(0, 16).replaceAll('-', '_') };
+}
+const registrationBody = user => ({ nombre: 'Ana María', apellido: 'Pérez García', username: user.username, avatarUrl: 'https://example.invalid/avatar.png' });
+
+test('US-01: client signup → incomplete identity → HTTP profile → persisted GET and idempotent retry', { timeout: 15000 }, async () => {
+  const user = await registeredIdentity('manual');
+  const incomplete = await http('GET', user.token);
+  assert.equal(incomplete.status, 200);
+  assert.deepEqual(incomplete.body.data, { uid: user.uid, profileStatus: 'incomplete', profile: null });
+  assert.equal((await auth.getUser(user.uid)).email, user.email);
+  const input = registrationBody(user);
+  const created = await http('POST', user.token, input);
+  assert.equal(created.status, 201); assert.equal(created.body.success, true);
+  assert.equal(created.body.data.profileStatus, 'complete');
+  const profileRef = db.doc('users/' + user.uid);
+  const stored = await profileRef.get();
+  assert.equal(stored.data().uid, user.uid); assert.equal(stored.data().email, user.email);
+  for (const [key, value] of Object.entries(input)) assert.equal(stored.data()[key], value);
+  assert.equal(stored.data().usernameKey, user.username.toLowerCase());
+  assert.equal(stored.data().profileStatus, 'complete');
+  assert.ok(stored.data().createdAt.toMillis() > 0); assert.ok(stored.data().updatedAt.toMillis() > 0);
+  assert.deepEqual((await db.doc('usernames/' + user.username.toLowerCase()).get()).data(), { uid: user.uid, usernameKey: user.username.toLowerCase() });
+  assert.equal(Object.hasOwn(stored.data(), 'password'), false);
+  const fetched = await http('GET', user.token);
+  assert.equal(fetched.status, 200); assert.deepEqual(fetched.body.data, created.body.data);
+  const repeated = await http('POST', user.token, input);
+  assert.equal(repeated.status, 200); assert.deepEqual(repeated.body, created.body);
+  assert.ok((await profileRef.get()).updateTime.isEqual(stored.updateTime));
+  assert.equal((await db.collection('users').where('uid', '==', user.uid).get()).size, 1);
+  assert.equal((await db.collection('usernames').where('uid', '==', user.uid).get()).size, 1);
+});
+
+test('US-01: another identity cannot claim a profile, forge its email or submit a password to profiles', { timeout: 15000 }, async () => {
+  const owner = await registeredIdentity('owner'); const other = await registeredIdentity('intruder');
+  const input = registrationBody(owner);
+  assert.equal((await http('POST', owner.token, input)).status, 201);
+  const before = await db.doc('users/' + owner.uid).get();
+  for (const forbidden of [{ uid: owner.uid }, { email: owner.email }, { password: require('node:crypto').randomUUID() }]) {
+    const response = await http('POST', other.token, { ...registrationBody(other), ...forbidden });
+    assert.equal(response.status, 400); assert.equal(response.body.code, 'VALIDATION_ERROR');
+  }
+  const taken = await http('POST', other.token, { ...registrationBody(other), username: owner.username.toLowerCase() });
+  assert.equal(taken.status, 409); assert.equal(taken.body.code, 'USERNAME_TAKEN');
+  const query = await fetch(apiOrigin + '/api/users/me?uid=' + encodeURIComponent(owner.uid), { headers: { Authorization: 'Bearer ' + other.token }, signal: AbortSignal.timeout(8000) });
+  assert.equal(query.status, 200);
+  assert.deepEqual((await query.json()).data, { uid: other.uid, profileStatus: 'incomplete', profile: null });
+  assert.ok((await db.doc('users/' + owner.uid).get()).updateTime.isEqual(before.updateTime));
+  assert.equal((await db.doc('users/' + other.uid).get()).exists, false);
+  assert.equal((await auth.getUser(other.uid)).email, other.email);
+});
+
+test('US-01: two HTTP registrations competing for a case-insensitive username have one persisted winner', { timeout: 15000 }, async () => {
+  const first = await registeredIdentity('race-a'); const second = await registeredIdentity('race-b');
+  const results = await Promise.all([
+    http('POST', first.token, registrationBody(first)),
+    http('POST', second.token, { ...registrationBody(second), username: first.username.toLowerCase() }),
+  ]);
+  assert.equal(results.filter(result => result.status === 201).length, 1);
+  const rejected = results.find(result => result.status !== 201);
+  assert.equal(rejected.status, 409); assert.equal(rejected.body.code, 'USERNAME_TAKEN');
+  const winner = results[0].status === 201 ? first : second;
+  const loser = winner === first ? second : first;
+  assert.equal((await db.doc('usernames/' + first.username.toLowerCase()).get()).data().uid, winner.uid);
+  assert.equal((await db.doc('users/' + winner.uid).get()).data().usernameKey, first.username.toLowerCase());
+  assert.equal((await db.doc('users/' + loser.uid).get()).exists, false);
+  assert.equal((await db.collection('usernames').where('uid', '==', loser.uid).get()).size, 0);
+  assert.equal((await http('GET', loser.token)).body.data.profileStatus, 'incomplete');
+  assert.equal((await auth.getUser(loser.uid)).email, loser.email);
+});
+
+test('US-01: Authentication Emulator rejects duplicate email independently of the profile API', { timeout: 15000 }, async () => {
+  const user = await registeredIdentity('duplicate-email');
+  const duplicate = await manualSignup(user.email);
+  assert.equal(duplicate.status, 400); assert.equal(duplicate.data.error.message, 'EMAIL_EXISTS');
+  assert.equal((await auth.listUsers()).users.filter(identity => identity.email === user.email).length, 1);
+  assert.equal((await db.doc('users/' + user.uid).get()).exists, false);
+  assert.equal((await db.collection('usernames').where('uid', '==', user.uid).get()).size, 0);
+  const profile = await http('POST', user.token, registrationBody(user));
+  assert.equal(profile.status, 201); assert.equal(profile.body.data.profile.email, user.email);
+});
