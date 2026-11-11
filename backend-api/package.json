@@ -23,7 +23,7 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
-    "firebase-admin": "^13.6.0",
+    "firebase-admin": "^14.5.0",
     "helmet": "^8.1.0",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
@@ -39,6 +39,6 @@
     "supertest": "^7.1.4",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "vitest": "^5.1.0"
   }
 }
