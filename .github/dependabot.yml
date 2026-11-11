@@ -1,0 +1,17 @@
+version: 2
+
+# Las actualizaciones automáticas de dependencias quedan pausadas en backend.
+# Se conserva la configuración explícita por servicio para evitar que Dependabot
+# vuelva a abrir PRs de versiones en cualquiera de los dos directorios.
+updates:
+  - package-ecosystem: npm
+    directory: /backend-api
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: npm
+    directory: /backend-realtime
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 0
