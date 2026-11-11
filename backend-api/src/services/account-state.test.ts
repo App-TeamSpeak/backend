@@ -16,7 +16,7 @@ function database(marker?: unknown) {
   if (marker !== undefined) data.set(`accountDeletions/${uid}`, marker);
   const reads: string[] = [];
   const get = vi.fn(async (path: string) => { reads.push(path); return { exists: data.has(path), data: () => data.get(path) }; });
-  const ref = (path: string) => ({ path, get: () => get(path) });
+  const ref = (path: string) => ({ path, get: () => get(path), onSnapshot: (next: (value: unknown) => void, error: (value: unknown) => void) => { let live = true; void get(path).then(value => { if (live) next(value); }, reason => { if (live) error(reason); }); return () => { live = false; }; } });
   const tx = { get: (reference: ReturnType<typeof ref>) => reference.get(), create: vi.fn(), set: vi.fn(), update: vi.fn(), delete: vi.fn() };
   const db = { collection: (name: string) => ({ doc: (id: string) => ref(`${name}/${id}`) }), runTransaction: async (fn: (transaction: typeof tx) => unknown) => fn(tx) };
   return { db: db as unknown as Firestore, data, reads, get, tx };

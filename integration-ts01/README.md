@@ -189,3 +189,11 @@ que necesitan acceso privado declaran correo verificado. No se envían correos r
 La política efectiva de producción no se acredita con el emulador. Detalles y pasos
 de Firebase Console en `../docs/us-01-backend.md`. Estas integraciones siguen fuera
 del pipeline habitual y no generan LCOV de Vitest automáticamente.
+
+## Validación de sesiones US-03 sin eliminación
+
+`node integration-ts01/run.cjs --login` selecciona exclusivamente
+`integration-us03/session.test.cjs`. Reutiliza el aislamiento, emuladores y cierre
+del lanzador; no ejecuta la suite principal que procesa eliminaciones. La suite
+de sesiones no elimina identidades/documentos y rechaza solicitudes HTTP DELETE.
+Contratos, límites de la evidencia y resultados: [US-03 Backend](../docs/us-03-backend.md).

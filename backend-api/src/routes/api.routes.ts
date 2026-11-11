@@ -1,3 +1,4 @@
+import { authorizationContext } from '../middleware/authorization-context';
 import { requireCompleteProfile } from '../middleware/complete-profile';
 import { deleteMe } from '../controllers/users.controller';
 import { requireDeletionAuth, requireDeletionTests } from '../middleware/deletion-auth';
@@ -12,6 +13,7 @@ export const apiRouter = Router();
 
 apiRouter.delete('/users/me', requireDeletionTests, requireDeletionAuth, deleteMe);
 apiRouter.use(requireAuth);
+apiRouter.use(authorizationContext);
 apiRouter.use(requireActiveAccount);
 apiRouter.use('/users', usersRouter);
 apiRouter.use(requireVerifiedEmail);

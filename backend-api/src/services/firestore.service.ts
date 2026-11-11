@@ -31,7 +31,20 @@ export async function getSprint0DemoDocument(
   return snapshot.exists ? (snapshot.data() as Record<string, unknown>) : null;
 }
 
+// Tracks actual service work, including transactions after an HTTP disconnect.
+let activeOperations = 0;
+const idleWaiters = new Set<() => void>();
+export function waitForFirestoreIdle(timeoutMs: number): Promise<boolean> {
+  if (activeOperations === 0) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const finish = (idle: boolean) => { clearTimeout(timer); idleWaiters.delete(done); resolve(idle); };
+    const done = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    idleWaiters.add(done);
+  });
+}
 export async function withFirestore<T>(operation: (db: Firestore) => Promise<T>, db?: Firestore): Promise<T> {
+  activeOperations++;
   try {
     return await operation(db ?? getFirestoreDb());
   } catch (error) {
@@ -41,5 +54,8 @@ export async function withFirestore<T>(operation: (db: Firestore) => Promise<T>,
       throw new AppError(503, 'FIRESTORE_UNAVAILABLE', 'Firestore no está disponible.');
     }
     throw new AppError(500, 'INTERNAL_ERROR', 'Ocurrió un error interno.');
+  } finally {
+    activeOperations--;
+    if (activeOperations === 0) for (const done of [...idleWaiters]) done();
   }
 }

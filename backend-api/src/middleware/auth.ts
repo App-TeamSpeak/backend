@@ -44,7 +44,12 @@ export async function requireAuth(request: Request, _response: Response, next: N
       ...(decoded.name ? { name: decoded.name } : {}),
     };
     next();
-  } catch {
+  } catch (error) {
+    const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+    if (new Set<unknown>(['app/network-error', 'app/network-timeout', 'auth/network-request-failed', 'auth/too-many-requests', 'auth/quota-exceeded']).has(code)) {
+      next(new AppError(503, 'AUTH_UNAVAILABLE', 'La autenticación no está disponible.'));
+      return;
+    }
     next(new AppError(401, 'AUTH_INVALID', 'El token de autenticación no es válido.'));
   }
 }

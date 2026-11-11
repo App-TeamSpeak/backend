@@ -13,7 +13,7 @@ function database(user?: unknown, reservation?: unknown) {
   const get = vi.fn(async (ref: string) => ({ exists: (ref === 'users' ? user : reservation) !== undefined, data: () => ref === 'users' ? user : reservation }));
   const transaction = { get, create, set };
   const runTransaction = vi.fn(async (callback: (tx: unknown) => unknown) => callback(transaction));
-  const doc = vi.fn((name: string, id: string) => ({ name, id, get: async () => ({ exists: name !== 'accountDeletions' && user !== undefined, data: () => name === 'accountDeletions' ? undefined : user }) }));
+  const doc = vi.fn((name: string, id: string) => ({ name, id, get: async () => ({ exists: name !== 'accountDeletions' && user !== undefined, data: () => name === 'accountDeletions' ? undefined : user }), onSnapshot: (next: (value: unknown) => void) => { queueMicrotask(() => next({ exists: name !== 'accountDeletions' && user !== undefined, data: () => name === 'accountDeletions' ? undefined : user })); return () => undefined; } }));
   const db = { collection: (name: string) => ({ doc: (id: string) => doc(name, id) }), runTransaction };
   get.mockImplementation(async (ref) => { const name = (ref as unknown as { name: string }).name; const data = name === 'accountDeletions' ? undefined : name === 'users' ? user : reservation; return { exists: data !== undefined, data: () => data }; });
   return { db: db as unknown as Firestore, create, get, runTransaction, doc, set };
@@ -81,7 +81,7 @@ describe('user profiles service (mock transactions, not a concurrency integratio
     expect(fake.create).toHaveBeenCalledTimes(2);
   });
   it('maps read failures to 503', async () => {
-    const db = { collection: () => ({ doc: () => ({ get: async () => { throw Object.assign(new Error('offline'), { code: 14 }); } }) }) };
+    const db = { collection: () => ({ doc: () => ({ onSnapshot: (_next: unknown, error: (value: unknown) => void) => { queueMicrotask(() => error({ code: 14 })); return () => undefined; } }) }) };
     await expect(getUserProfile(identity, db as unknown as Firestore)).rejects.toMatchObject({ code: 'FIRESTORE_UNAVAILABLE' });
   });
   it('completes missing fields and preserves existing creation date and data', async () => {

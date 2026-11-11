@@ -7,19 +7,22 @@ import { beginAccountDeletion } from '../services/account-deletion.service';
 export const getMe: RequestHandler = async (request, response) => {
   if (!request.user) throw new AppError(401, 'AUTH_REQUIRED', 'Se requiere autenticación.');
   response.setHeader('Cache-Control', 'no-store');
-  response.json({ success: true, data: await getUserProfile(request.user) });
+  const data = await getUserProfile(request.user);
+  if (!response.destroyed) response.json({ success: true, data });
 };
 
 export const createMe: RequestHandler = async (request, response) => {
   if (!request.user) throw new AppError(401, 'AUTH_REQUIRED', 'Se requiere autenticación.');
   response.setHeader('Cache-Control', 'no-store');
   const result = await createUserProfile(request.user, userBodySchema.parse(request.body));
+  if (response.destroyed) return;
   response.status(result.created ? 201 : 200).json({ success: true, data: result.data });
 };
 export const updateMe: RequestHandler = async (request, response) => {
   if (!request.user) throw new AppError(401, 'AUTH_REQUIRED', 'Se requiere autenticación.');
   response.setHeader('Cache-Control', 'no-store');
-  response.json({ success: true, data: await updateUserProfile(request.user, userPatchSchema.parse(request.body)) });
+  const data = await updateUserProfile(request.user, userPatchSchema.parse(request.body));
+  if (!response.destroyed) response.json({ success: true, data });
 };
 export const deleteMe: RequestHandler = async (request, response) => {
   if (!request.user) throw new AppError(401, 'AUTH_REQUIRED', 'Se requiere autenticación.');

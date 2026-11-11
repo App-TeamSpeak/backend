@@ -1,3 +1,4 @@
+import { readAuthorizationDocument } from './authorization-read.service';
 import type { Firestore } from 'firebase-admin/firestore';
 import { AppError } from '../middleware/errors';
 import { getFirestoreCollections, withFirestore } from './firestore.service';
@@ -14,6 +15,6 @@ export function assertNoAccountDeletion(snapshot: { exists: boolean; data(): unk
 
 export async function ensureAccountActive(uid: string, db?: Firestore): Promise<void> {
   await withFirestore(async (firestore) => {
-    assertNoAccountDeletion(await getFirestoreCollections(firestore).accountDeletions.doc(uid).get());
+    assertNoAccountDeletion(await readAuthorizationDocument(getFirestoreCollections(firestore).accountDeletions.doc(uid)));
   }, db);
 }

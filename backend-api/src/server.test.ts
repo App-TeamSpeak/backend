@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const lifecycle = vi.hoisted(() => ({ enabled: false, listen: vi.fn(), start: vi.fn(), stop: vi.fn(), create: vi.fn(), closeFirebase: vi.fn() }));
-vi.mock('./app', () => ({ app: { listen: lifecycle.listen } }));
+vi.mock('./app', () => ({ app: { listen: lifecycle.listen }, setApiAcceptingRequests: vi.fn() }));
 vi.mock('./config/firebase', () => ({ closeFirebase: lifecycle.closeFirebase }));
 vi.mock('./config/env', () => ({ env: { PORT: 10000 } }));
 vi.mock('./services/account-deletion.reconciler', () => ({ createAccountDeletionReconciler: lifecycle.create }));
@@ -21,7 +21,7 @@ beforeEach(() => {
   lifecycle.listen.mockImplementation((_port, _host, callback) => { listening = callback; return http; });
   signals = spySignals();
 });
-afterEach(() => { vi.restoreAllMocks(); });
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 it('keeps ordinary HTTP startup with disabled reconciliation and has no effects on import', async () => {
   const start = await load(); expect(lifecycle.listen).not.toHaveBeenCalled();
   const runtime = start(); expect(lifecycle.start).not.toHaveBeenCalled();
@@ -99,4 +99,67 @@ it('closes main Firebase resources after HTTP and preserves an initial failure i
   lifecycle.closeFirebase.mockImplementation(async () => { expect(http.close).toHaveBeenCalledOnce(); throw new Error('PRIVATE Firebase cleanup'); });
   const runtime = (await load())(); listening(); await expect(runtime.ready).rejects.toBe(original);
   expect(lifecycle.stop).toHaveBeenCalledOnce(); expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('PRIVATE');
+});
+it('forces HTTP connections only after grace and reports the abnormal shutdown', async () => {
+  vi.useFakeTimers(); const runtime = (await load())(); listening(); await runtime.ready;
+  let finish!: () => void;
+  http.close.mockImplementation(callback => { finish = () => callback(); });
+  const closeAll = vi.fn(() => finish()); Object.assign(http, { closeAllConnections: closeAll });
+  const stopped = runtime.stop(); const failed = expect(stopped).rejects.toMatchObject({ code: 'SERVER_SHUTDOWN_FAILED' });
+  await flush(); expect(closeAll).not.toHaveBeenCalled(); await vi.advanceTimersByTimeAsync(6000); await failed;
+  expect(closeAll).toHaveBeenCalledOnce(); expect(lifecycle.closeFirebase).toHaveBeenCalledOnce(); expect(runtime.stop()).toBe(stopped); expect(vi.getTimerCount()).toBe(0);
+});
+it('bounds a nonresponding Firebase close and handles its later rejection', async () => {
+  vi.useFakeTimers(); const runtime = (await load())(); listening(); await runtime.ready;
+  let fail!: (error: Error) => void;
+  lifecycle.closeFirebase.mockImplementation(() => new Promise((_resolve, reject) => { fail = reject; }));
+  const stopped = runtime.stop(); const rejected = expect(stopped).rejects.toMatchObject({ code: 'SERVER_SHUTDOWN_FAILED' });
+  await vi.advanceTimersByTimeAsync(5000); await rejected; fail(new Error('private late failure')); await flush(); expect(vi.getTimerCount()).toBe(0);
+});
+it('does not terminate Firebase while an admitted transaction remains in progress', async () => {
+  vi.useFakeTimers(); const runtime = (await load())(); listening(); await runtime.ready;
+  const { withFirestore } = await import('./services/firestore.service.js'); let complete!: () => void;
+  const admitted = withFirestore(() => new Promise<void>(resolve => { complete = resolve; }), {} as never);
+  const rejected = expect(runtime.stop()).rejects.toMatchObject({ code: 'SERVER_SHUTDOWN_FAILED' });
+  await vi.advanceTimersByTimeAsync(5000); await rejected; expect(lifecycle.closeFirebase).not.toHaveBeenCalled(); complete(); await admitted;
+  expect(vi.getTimerCount()).toBe(0);
+});
+it('waits for admitted work to finish before terminating Firebase', async () => {
+  const runtime = (await load())(); listening(); await runtime.ready;
+  const { withFirestore } = await import('./services/firestore.service.js'); let complete!: () => void;
+  const work = withFirestore(() => new Promise<void>(resolve => { complete = resolve; }), {} as never);
+  const stopping = runtime.stop(); await flush(); expect(lifecycle.closeFirebase).not.toHaveBeenCalled(); complete(); await work; await stopping; expect(lifecycle.closeFirebase).toHaveBeenCalledOnce();
+});
+it('bounds an unfinished reconciler without closing Firebase beneath it', async () => {
+  vi.useFakeTimers(); const runtime = (await load())(); listening(); await runtime.ready;
+  lifecycle.stop.mockReturnValue(new Promise(() => {}));
+  const rejected = expect(runtime.stop()).rejects.toMatchObject({ code: 'SERVER_SHUTDOWN_FAILED' }); await vi.advanceTimersByTimeAsync(5000); await rejected;
+  expect(lifecycle.closeFirebase).not.toHaveBeenCalled(); expect(http.close).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0);
+});
+it('preserves the original startup failure when Firebase shutdown exceeds its deadline', async () => {
+  vi.useFakeTimers(); const original = new Error('original startup'); lifecycle.start.mockRejectedValue(original);
+  lifecycle.closeFirebase.mockReturnValue(new Promise(() => {})); const runtime = (await load())();
+  const ready = expect(runtime.ready).rejects.toBe(original); listening(); await vi.advanceTimersByTimeAsync(5000); await ready;
+  await expect(runtime.stop()).rejects.toMatchObject({ code: 'SERVER_SHUTDOWN_FAILED' });
+});
+it('CLI owner reports and terminates with failure at the hard deadline if SDK resources never close', async () => {
+  vi.useFakeTimers(); const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+  const previousExitCode = process.exitCode;
+  try {
+    const { startApiProcess } = await import('./server.js'); const runtime = startApiProcess()!; listening(); await runtime.ready;
+    lifecycle.closeFirebase.mockReturnValue(new Promise(() => {}));
+    const rejected = expect(runtime.stop()).rejects.toMatchObject({ code: 'SERVER_SHUTDOWN_FAILED' });
+    for (const [, handler] of signals.mock.calls.filter(([signal]) => signal === 'SIGTERM')) (handler as () => void)();
+    await vi.advanceTimersByTimeAsync(5000); await rejected; expect(exit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(20000); expect(exit).toHaveBeenCalledExactlyOnceWith(1);
+    expect(console.error).toHaveBeenCalledWith({ event: 'api_shutdown_hard_deadline', code: 'SERVER_SHUTDOWN_FAILED' });
+  } finally { process.exitCode = previousExitCode; }
+});
+it('does not force connections or close Firebase immediately when HTTP close reports an error', async () => {
+  const runtime = (await load())(); listening(); await runtime.ready;
+  const force = vi.fn(); Object.assign(http, { closeAllConnections: force });
+  http.close.mockImplementation(callback => callback(new Error('private close failure')));
+  await expect(runtime.stop()).rejects.toMatchObject({ code: 'SERVER_SHUTDOWN_FAILED' });
+  expect(force).not.toHaveBeenCalled(); expect(lifecycle.closeFirebase).not.toHaveBeenCalled();
+  expect(http.listenerCount('error')).toBe(1); http.emit('close'); expect(http.listenerCount('error')).toBe(0);
 });
