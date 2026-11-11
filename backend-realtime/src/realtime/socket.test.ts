@@ -1,6 +1,8 @@
+import { ProfileAuthorizationError } from '../services/profile-state.service';
 import { createServer, type Server } from 'node:http';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ verifyToken: vi.fn(), requireActiveAccount: vi.fn(), startAccountAuthorization: vi.fn(), watchAccountDeletion: vi.fn() }));
+const mocks = vi.hoisted(() => ({ verifyToken: vi.fn(), requireActiveAccount: vi.fn(), startAccountAuthorization: vi.fn(), watchAccountDeletion: vi.fn(), requireCompleteProfile: vi.fn() }));
+vi.mock('../services/profile-state.service', async original => ({ ...await original<typeof import('../services/profile-state.service')>(), requireCompleteProfile: mocks.requireCompleteProfile }));
 vi.mock('../services/firebase-auth.service', () => ({ verifyToken: mocks.verifyToken }));
 vi.mock('../services/account-state.service', async (original) => ({ ...await original<typeof import('../services/account-state.service')>(), requireActiveAccount: mocks.requireActiveAccount, startAccountAuthorization: mocks.startAccountAuthorization }));
 vi.mock('../config/firebase', async (original) => ({
@@ -15,6 +17,7 @@ beforeEach(async () => {
   vi.resetAllMocks(); clients = [];
   mocks.verifyToken.mockImplementation(async (token) => ({ uid: token, email_verified: true }));
   mocks.requireActiveAccount.mockResolvedValue(undefined);
+  mocks.requireCompleteProfile.mockResolvedValue(undefined);
   mocks.watchAccountDeletion.mockImplementation((_uid, changed) => { queueMicrotask(() => changed(false)); return vi.fn(); });
   mocks.startAccountAuthorization.mockImplementation((uid) => {
     const authorized = mocks.requireActiveAccount(uid);
@@ -276,6 +279,12 @@ it.each([false, undefined, 'true', 1])('rejects an unverified handshake despite 
   const value = client({ token: 'fixture', emailVerified: true, email_verified: true });
   expect(await value.wait('connect_error')).toMatchObject({ message: 'EMAIL_NOT_VERIFIED', data: { code: 'EMAIL_NOT_VERIFIED' } });
   expect(io.sockets.sockets.size).toBe(0);
-  expect(mocks.requireActiveAccount).not.toHaveBeenCalled();
+  expect(mocks.requireCompleteProfile).not.toHaveBeenCalled();
   expect(mocks.watchAccountDeletion).not.toHaveBeenCalled();
+});
+it.each(['PROFILE_INCOMPLETE', 'PROFILE_INCONSISTENT', 'AUTHORIZATION_UNAVAILABLE'] as const)('rejects handshake with %s before supervision and handlers', async code => {
+  mocks.requireCompleteProfile.mockRejectedValue(new ProfileAuthorizationError(code));
+  expect(await client({ token: 'trusted', profileStatus: 'complete' }).wait('connect_error')).toMatchObject({ message: code, data: { code } });
+  expect(mocks.requireCompleteProfile).toHaveBeenCalledExactlyOnceWith('trusted');
+  expect(mocks.watchAccountDeletion).not.toHaveBeenCalled(); expect(io.sockets.sockets.size).toBe(0);
 });

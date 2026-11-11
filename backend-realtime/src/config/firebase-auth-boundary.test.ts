@@ -61,3 +61,15 @@ it('a retained marker read operation cannot bypass configuration or closure chec
   await expect(read('fixture')).rejects.toMatchObject({ code: 'FIREBASE_CLIENTS_CLOSED' });
   expect(networkAttempt).not.toHaveBeenCalled();
 });
+it('retained profile read rejects configuration drift and closure without network access', async () => {
+  const f = await load(); const read = f.readUserProfile;
+  vi.stubEnv('FIRESTORE_EMULATOR_HOST', '127.0.0.1:8082');
+  await expect(read('fixture')).rejects.toMatchObject({ code: 'FIREBASE_CONFIGURATION_CHANGED' });
+  await f.closeFirebase();
+  await expect(read('fixture')).rejects.toMatchObject({ code: 'FIREBASE_CLIENTS_CLOSED' });
+  expect(networkAttempt).not.toHaveBeenCalled();
+});
+it.each(['', 'a/b', 'a'.repeat(129)])('rejects invalid profile document identity before SDK access: %s', async uid => {
+  const read = (await load()).readUserProfile;
+  await expect(read(uid)).rejects.toThrow('INVALID_UID'); expect(networkAttempt).not.toHaveBeenCalled();
+});

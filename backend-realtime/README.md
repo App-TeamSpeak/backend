@@ -441,3 +441,14 @@ En caso contrario rechaza con `EMAIL_NOT_VERIFIED`. Las banderas del cliente y e
 proveedor de identidad no omiten el control. Tras verificar mediante el enlace nativo,
 el cliente debe refrescar el ID token y reconectar. Los ocho eventos mantienen sus
 guards y límites. Consulte `../docs/us-01-backend.md` para el flujo API y Firebase.
+
+### US-02: perfil completo
+
+El handshake exige cuenta activa, correo verificado y perfil completo autoritativo de
+`users/{uid}`. Rechaza `PROFILE_INCOMPLETE`, `PROFILE_INCONSISTENT` o
+`AUTHORIZATION_UNAVAILABLE` antes de registrar la sesión. Los guards de los ocho
+eventos y la supervisión de eliminación permanecen activos. No se añade una
+lectura de perfil por evento: PATCH no puede degradar el perfil y la eliminación
+se supervisa por marcador. Las escrituras administrativas externas sin marcador
+se detectan al reconectar. Contratos, pruebas y responsabilidades frontend:
+[US-02 Backend](../docs/us-02-backend.md).

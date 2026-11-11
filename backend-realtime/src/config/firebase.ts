@@ -114,6 +114,14 @@ export async function hasAccountDeletion(uid: string): Promise<boolean> {
   return snapshot.exists;
 }
 
+// Read-only authorization boundary: revalidate configuration after the SDK settles.
+export async function readUserProfile(uid: string): Promise<unknown> {
+  if (!uid || uid.length > 128 || uid.includes('/')) throw new Error('INVALID_UID');
+  const snapshot = await getFirestoreDb().collection('users').doc(uid).get();
+  configuration();
+  return snapshot.exists ? snapshot.data() : undefined;
+}
+
 // Controlled subscription: only existence and sanitized failure cross this boundary.
 export function watchAccountDeletion(uid: string, changed: (exists: boolean) => void, failed: (error: FirebaseConfigurationError) => void): () => void {
   if (!uid || uid.length > 128 || uid.includes('/')) return reject('FIREBASE_INVALID_UID');

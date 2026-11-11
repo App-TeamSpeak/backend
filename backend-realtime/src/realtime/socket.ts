@@ -1,3 +1,4 @@
+import { requireCompleteProfile, ProfileAuthorizationError } from '../services/profile-state.service';
 import type { Server as HttpServer } from 'node:http';
 import { Server, type Socket } from 'socket.io';
 import { createAccountAccess } from './account-access';
@@ -19,6 +20,8 @@ export const MAX_IN_FLIGHT_EVENT_AUTHORIZATIONS_PER_SERVER = 64;
 const messages = {
   AUTHORIZATION_BUSY: 'Hay demasiadas autorizaciones pendientes. Inténtalo más tarde.',
   AUTH_REQUIRED: 'Se requiere autenticación.',
+  PROFILE_INCOMPLETE: 'Completa tu perfil y selecciona un username antes de acceder.',
+  PROFILE_INCONSISTENT: 'El perfil requiere revisión.',
   EMAIL_NOT_VERIFIED: 'Verifica tu correo y actualiza el ID token para acceder.',
   AUTH_INVALID: 'La autenticación no es válida.',
   ACCOUNT_UNAVAILABLE: 'La cuenta no puede realizar esta operación.',
@@ -29,7 +32,7 @@ const messages = {
 };
 type Code = keyof typeof messages;
 type Ack = (result: { ok: boolean; error?: { code: Code; message: string } }) => void;
-const codeFor = (error: unknown): Code => error instanceof AccountAuthorizationError ? error.code : 'AUTHORIZATION_UNAVAILABLE';
+const codeFor = (error: unknown): Code => error instanceof AccountAuthorizationError || error instanceof ProfileAuthorizationError ? error.code : 'AUTHORIZATION_UNAVAILABLE';
 const field = (payload: unknown, key: string): unknown =>
   typeof payload === 'object' && payload !== null && !Array.isArray(payload) ? (payload as Record<string, unknown>)[key] : undefined;
 function report(socket: Socket, code: Code, ack?: Ack) {
@@ -70,8 +73,9 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
         deny(error instanceof AccountAuthorizationError || error instanceof FirebaseConfigurationError ? 'AUTHORIZATION_UNAVAILABLE' : 'AUTH_INVALID');
         return;
       }
-      if (user.email_verified !== true) { deny('EMAIL_NOT_VERIFIED'); return; }
       await requireActiveAccount(user.uid);
+      if (user.email_verified !== true) { deny('EMAIL_NOT_VERIFIED'); return; }
+      await requireCompleteProfile(user.uid);
       socket.data.user = user;
       await access.attach(user.uid, {
         block: (code) => { socket.data.accountAccessBlocked = true; socket.data.accountAccessCode = code; },

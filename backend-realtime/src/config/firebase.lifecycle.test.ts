@@ -120,3 +120,19 @@ it('sanitizes a subscription construction failure and leaves no owned registrati
   expect(failed).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ code: 'FIREBASE_OBSERVER_FAILED' }));
   await f.closeFirebase(); expect(failed).toHaveBeenCalledOnce();
 });
+it('reads only the requested profile and rejects results settled after configuration drift', async () => {
+  const value = { uid: 'fixture', profileStatus: 'incomplete' };
+  const get = vi.fn().mockResolvedValue({ exists: true, data: () => value });
+  const doc = vi.fn(() => ({ get })); const collection = vi.fn(() => ({ doc }));
+  sdk.Firestore.mockImplementation(function () { return { terminate: sdk.terminate, collection }; });
+  const f = await load();
+  expect(await f.readUserProfile('fixture')).toEqual(value);
+  expect(collection).toHaveBeenCalledExactlyOnceWith('users'); expect(doc).toHaveBeenCalledExactlyOnceWith('fixture');
+  get.mockResolvedValueOnce({ exists: false }); expect(await f.readUserProfile('fixture')).toBeUndefined();
+  let release!: (value: { exists: boolean }) => void;
+  get.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  const reading = f.readUserProfile('fixture');
+  vi.stubEnv('FIRESTORE_EMULATOR_HOST', '127.0.0.1:8082'); release({ exists: false });
+  await expect(reading).rejects.toMatchObject({ code: 'FIREBASE_CONFIGURATION_CHANGED' });
+  await f.closeFirebase();
+});

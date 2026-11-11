@@ -243,6 +243,77 @@ test('US-01 verification: native email link, stale token denial, refreshed token
   await socket.close();
 });
 
+// Synthetic Google credential accepted only by Authentication Emulator; no Google OAuth request.
+async function googleIdentity(suffix, verified = true) {
+  net.assertSafe();
+  const sub = prefix + '-google-' + suffix;
+  const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const credential = encode({ alg: 'none', typ: 'JWT' }) + '.' + encode({ sub, email: sub + '@example.com', email_verified: verified, name: 'Google Fixture', picture: 'https://example.com/avatar.png' }) + '.';
+  const response = await fetch(authOrigin + '/identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key=emulator-only', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ postBody: new URLSearchParams({ id_token: credential, providerId: 'google.com' }).toString(), requestUri: 'http://localhost', returnSecureToken: true }), signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(response.status, 200);
+  const result = await response.json(); const decoded = await auth.verifyIdToken(result.idToken, true);
+  assert.equal(decoded.firebase.sign_in_provider, 'google.com');
+  assert.equal((await auth.getUser(decoded.uid)).providerData[0].providerId, 'google.com');
+  return { uid: decoded.uid, token: result.idToken, username: 'Google_' + suffix + '_' + prefix.slice(-8) };
+}
+async function privateRooms(user) {
+  const response = await fetch(apiOrigin + '/api/rooms', { headers: { Authorization: 'Bearer ' + user.token }, signal: AbortSignal.timeout(8000) });
+  return { status: response.status, body: await response.json() };
+}
+test('US-02 Google: first login requires profile; completion permits HTTP and real WebSocket; recurrent login preserves reservations', { timeout: 20000 }, async () => {
+  const user = await googleIdentity('first');
+  assert.equal((await http('GET', user.token)).body.data.profileStatus, 'incomplete');
+  assert.equal((await privateRooms(user)).body.code, 'PROFILE_INCOMPLETE');
+  const patch = await http('PATCH', user.token, { nombre: 'Forged', profileStatus: 'complete' });
+  assert.equal(patch.status, 403); assert.equal(patch.body.code, 'PROFILE_INCOMPLETE');
+  assert.equal((await reconnectDenied(user)).data.code, 'PROFILE_INCOMPLETE');
+  for (const forged of [{ uid: 'other' }, { email: 'other@example.com' }, { profileStatus: 'complete' }]) {
+    assert.equal((await http('POST', user.token, { nombre: 'Google', apellido: 'Fixture', username: user.username, ...forged })).status, 400);
+  }
+  await profile(user);
+  assert.equal((await http('GET', user.token)).body.data.profile.avatarUrl, null);
+  assert.equal((await http('PATCH', user.token, { nombre: 'Actualizado' })).status, 200);
+  assert.equal((await privateRooms(user)).status, 501); // Existing placeholder reached after authorization.
+  const socket = await connect(user); assert.equal((await socket.request('room:join', { roomId: 'google-room' })).ok, true);
+  const before = await db.doc('users/' + user.uid).get();
+  const recurrent = await googleIdentity('first'); assert.equal(recurrent.uid, user.uid);
+  assert.equal((await http('GET', recurrent.token)).body.data.profile.username, user.username);
+  assert.equal((await db.collection('usernames').where('uid', '==', user.uid).get()).size, 1);
+  assert.ok((await db.doc('users/' + user.uid).get()).updateTime.isEqual(before.updateTime));
+  await connect(recurrent);
+});
+test('US-02 Google: interrupted onboarding leaves no reservations and can resume', { timeout: 15000 }, async () => {
+  const first = await googleIdentity('resume');
+  assert.equal((await db.doc('users/' + first.uid).get()).exists, false);
+  assert.equal((await db.collection('usernames').where('uid', '==', first.uid).get()).size, 0);
+  const resumed = await googleIdentity('resume'); assert.equal(resumed.uid, first.uid);
+  assert.equal((await privateRooms(resumed)).body.code, 'PROFILE_INCOMPLETE');
+  await profile(resumed); await connect(resumed);
+});
+test('US-02 Google: concurrent case-insensitive usernames have one transactional winner', { timeout: 15000 }, async () => {
+  const a = await googleIdentity('raceA'); const b = await googleIdentity('raceB');
+  const results = await Promise.all([http('POST', a.token, { nombre: 'A', apellido: 'Fixture', username: a.username }), http('POST', b.token, { nombre: 'B', apellido: 'Fixture', username: a.username.toLowerCase() })]);
+  assert.equal(results.filter(r => r.status === 201).length, 1);
+  assert.equal(results.find(r => r.status !== 201).body.code, 'USERNAME_TAKEN');
+  const loser = results[0].status === 201 ? b : a;
+  assert.equal((await db.doc('users/' + loser.uid).get()).exists, false);
+  assert.equal((await db.collection('usernames').where('uid', '==', loser.uid).get()).size, 0);
+  assert.equal((await reconnectDenied(loser)).data.code, 'PROFILE_INCOMPLETE');
+});
+test('US-02 Google: persisted partial and inconsistent profiles are distinct from completed authorization', { timeout: 15000 }, async () => {
+  const user = await googleIdentity('partial'); const ref = db.doc('users/' + user.uid);
+  await ref.create({ uid: user.uid, profileStatus: 'incomplete' });
+  assert.equal((await http('GET', user.token)).body.data.profileStatus, 'incomplete');
+  assert.equal((await privateRooms(user)).body.code, 'PROFILE_INCOMPLETE');
+  assert.equal((await reconnectDenied(user)).data.code, 'PROFILE_INCOMPLETE');
+  await ref.set({ uid: 'other', profileStatus: 'complete' });
+  const response = await privateRooms(user); assert.equal(response.status, 409); assert.equal(response.body.code, 'PROFILE_INCONSISTENT');
+  assert.equal((await reconnectDenied(user)).data.code, 'PROFILE_INCONSISTENT');
+});
+
 test('shutdown with an active observed socket is idempotent and leaves API independently usable', { timeout: 15000 }, async () => {
   const user = await identity('shutdown'); await profile(user);
   const socket = await connect(user); await socket.request('room:join', { roomId: 'shutdown-room' });
