@@ -3,27 +3,46 @@ import { describe, expect, it, vi } from 'vitest';
 import { updateUserProfile } from './users.service';
 const identity = { uid: 'uid-1', email: 'ana@example.com' };
 const profile = { ...identity, nombre: 'Ana', apellido: 'Pérez', username: 'Ana-User1', usernameKey: 'ana-user1', avatarUrl: 'https://example.com/avatar.png', profileStatus: 'complete', createdAt: Timestamp.fromMillis(1000), updatedAt: Timestamp.fromMillis(2000) };
-function database(user: unknown = profile, reservations: Record<string, unknown> = { 'ana-user1': { uid: identity.uid, usernameKey: 'ana-user1' } }) {
+function database(
+  user: unknown = profile,
+  reservations: Record<string, unknown> = { 'ana-user1': { uid: identity.uid, usernameKey: 'ana-user1' } },
+  emailMatches: Array<{ id: string; data: Record<string, unknown> }> = [],
+) {
   const ref = (collection: string, id: string) => ({ collection, id });
-  const get = vi.fn(async (reference: ReturnType<typeof ref>) => {
-    const value = reference.collection === 'accountDeletions' ? undefined : reference.collection === 'users' ? user : reservations[reference.id];
+  const get = vi.fn(async (reference: ReturnType<typeof ref> | { kind: 'emailQuery'; email: string }) => {
+    if ('kind' in reference && reference.kind === 'emailQuery') {
+      const docs = emailMatches
+        .filter((entry) => entry.data.email === reference.email)
+        .map((entry) => ({ id: entry.id, data: () => entry.data }));
+      return { empty: docs.length === 0, size: docs.length, docs };
+    }
+    const refObj = reference as ReturnType<typeof ref>;
+    const value = refObj.collection === 'accountDeletions' ? undefined : refObj.collection === 'users' ? user : reservations[refObj.id];
     return { exists: value !== null && value !== undefined, data: () => value };
   });
   const tx = { get, create: vi.fn(), update: vi.fn(), delete: vi.fn() };
   const runTransaction = vi.fn(async (fn: (transaction: typeof tx) => unknown) => fn(tx));
-  const db = { collection: (name: string) => ({ doc: (id: string) => ref(name, id) }), runTransaction };
+  const db = {
+    collection: (name: string) => ({
+      doc: (id: string) => ref(name, id),
+      where: (_field: string, _op: string, value: string) => ({
+        limit: () => ({ kind: 'emailQuery', email: value }),
+      }),
+    }),
+    runTransaction,
+  };
   return { db: db as unknown as Firestore, tx, runTransaction };
 }
 function noWrites(tx: ReturnType<typeof database>['tx']) {
   expect(tx.create).not.toHaveBeenCalled(); expect(tx.update).not.toHaveBeenCalled(); expect(tx.delete).not.toHaveBeenCalled();
 }
 describe('partial profile updates', () => {
-  it.each([{ nombre: ' Ana María ' }, { apellido: ' García ' }, { avatarUrl: ' https://example.com/new.png ' }, { avatarUrl: null }])('updates only requested fields: %j', async (patch) => {
+  it.each([{ nombre: ' Ana María ' }, { apellido: ' García ' }, { email: ' ana.nueva@example.com ' }, { avatarUrl: ' https://example.com/new.png ' }, { avatarUrl: null }])('updates only requested fields: %j', async (patch) => {
     const { db, tx } = database();
     const result = await updateUserProfile(identity, patch, db);
     expect(result.profile.createdAt).toBe(profile.createdAt.toDate().toISOString());
     expect(result.profile.updatedAt).not.toBe(profile.updatedAt.toDate().toISOString());
-    expect(result.profile).toMatchObject({ uid: identity.uid, email: profile.email, username: profile.username });
+    expect(result.profile).toMatchObject({ uid: identity.uid, username: profile.username });
     const changes = tx.update.mock.calls[0][1];
     expect(Object.keys(changes).sort()).toEqual([...Object.keys(patch), 'updatedAt'].sort());
     expect(result.profile.avatarUrl).toBe('avatarUrl' in patch ? patch.avatarUrl?.trim() ?? null : profile.avatarUrl);
@@ -43,12 +62,17 @@ describe('partial profile updates', () => {
     expect(tx.update.mock.calls[0][1]).toMatchObject({ username: 'ANA-USER1' });
     expect(tx.create).not.toHaveBeenCalled(); expect(tx.delete).not.toHaveBeenCalled();
   });
-  it.each([{ nombre: ' Ana ' }, { username: ' Ana-User1 ' }, { avatarUrl: profile.avatarUrl }])('skips all writes for equivalent values %j', async (patch) => {
+  it.each([{ nombre: ' Ana ' }, { email: ' ANA@example.com ' }, { username: ' Ana-User1 ' }, { avatarUrl: profile.avatarUrl }])('skips all writes for equivalent values %j', async (patch) => {
     const { db, tx } = database();
     const result = await updateUserProfile(identity, patch, db);
     expect(result.profile.updatedAt).toBe(profile.updatedAt.toDate().toISOString()); noWrites(tx);
   });
-  it('preserves persisted email even when identity has another email', async () => {
+  it('rejects email already used by another user', async () => {
+    const { db, tx } = database(profile, undefined, [{ id: 'other-uid', data: { email: 'taken@example.com' } }]);
+    await expect(updateUserProfile(identity, { email: 'TAKEN@example.com' }, db)).rejects.toMatchObject({ statusCode: 409, code: 'EMAIL_TAKEN' });
+    noWrites(tx);
+  });
+  it('preserves persisted email when patch omits email even if token email differs', async () => {
     const { db } = database();
     expect((await updateUserProfile({ uid: identity.uid, email: 'new@example.com' }, { nombre: 'Nueva' }, db)).profile.email).toBe(profile.email);
   });
