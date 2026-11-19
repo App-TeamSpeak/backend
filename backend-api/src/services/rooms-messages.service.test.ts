@@ -24,13 +24,13 @@ function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: St
       collection: vi.fn((name: string) => collection(name === 'members' ? 'members' : 'messages', key)),
     };
   };
-  const collection = (kind: 'rooms' | 'members' | 'messages', roomId?: string): any => ({
-    doc: vi.fn((id?: string) => ref(kind, id, roomId)),
+  const collection = (kind: 'rooms' | 'members' | 'messages' | 'accountDeletions', roomId?: string): any => ({
+    doc: vi.fn((id?: string) => kind === 'accountDeletions' ? { id, get: vi.fn(async () => ({ exists: false, data: () => undefined })) } : ref(kind, id, roomId)),
     where: vi.fn((_field: string, _operator: string, value: unknown) => ({ get: vi.fn(async () => ({ docs: [...rooms.values()].filter(room => room.ownerId === value).map(data => ({ data: () => data })) })) })),
     orderBy: vi.fn(() => ({ limit: vi.fn(() => ({ get: vi.fn(async () => ({ docs: [...messages.values()].sort((a, b) => (a.createdAt as Timestamp).toMillis() - (b.createdAt as Timestamp).toMillis()).map(data => ({ data: () => data })) })) })) })),
     get: vi.fn(async () => {
       const values = kind === 'rooms' ? [...rooms.values()] : kind === 'members' ? [...members.entries()].filter(([key]) => key.startsWith(`${roomId}/`)).map(([, value]) => value) : [...messages.values()];
-      return { docs: values.map(data => ({ ref: ref(kind, String(data.messageId ?? data.uid ?? data.roomId), roomId), data: () => data })), size: kind === 'rooms' ? rooms.size : kind === 'members' ? [...members.keys()].filter(key => key.startsWith(`${roomId}/`)).length : messages.size };
+      return { docs: values.map(data => ({ ref: ref(kind === 'accountDeletions' ? 'rooms' : kind, String(data.messageId ?? data.uid ?? data.roomId), roomId), data: () => data })), size: kind === 'rooms' ? rooms.size : kind === 'members' ? [...members.keys()].filter(key => key.startsWith(`${roomId}/`)).length : messages.size };
     }),
   });
   const batch = {
@@ -40,8 +40,12 @@ function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: St
     commit: vi.fn(async () => undefined),
   };
   const db = {
-    collection: vi.fn((name: string) => collection(name === 'rooms' ? 'rooms' : name === 'members' ? 'members' : 'messages')),
-    runTransaction: vi.fn(async (callback: (transaction: any) => unknown) => callback({ create: vi.fn(async (value: any, data: Stored) => value.create(data)) })),
+    collection: vi.fn((name: string) => collection(name === 'rooms' ? 'rooms' : name === 'members' ? 'members' : name === 'accountDeletions' ? 'accountDeletions' : 'messages')),
+    runTransaction: vi.fn(async (callback: (transaction: any) => unknown) => callback({
+      get: vi.fn(async (value: any) => value.get()),
+      create: vi.fn(async (value: any, data: Stored) => value.create(data)),
+      set: vi.fn(async (value: any, data: Stored, opts?: { merge?: boolean }) => value.set(data, opts)),
+    })),
     batch: vi.fn(() => batch),
   } as unknown as Firestore;
   return { db, rooms, members, messages };

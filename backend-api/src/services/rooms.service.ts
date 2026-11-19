@@ -1,5 +1,6 @@
 import { Timestamp, type Firestore } from 'firebase-admin/firestore';
 import { AppError } from '../middleware/errors';
+import { assertNoAccountDeletion } from './account-state.service';
 import { getFirestoreCollections, getRoomMembersCollection, getRoomMessagesCollection, withFirestore } from './firestore.service';
 import type { RoomDocument } from './firestore.documents';
 
@@ -28,11 +29,12 @@ export async function listRooms(uid: string, db?: Firestore) {
 }
 export async function createRoom(uid: string, name: string, db?: Firestore) {
   return withFirestore(async firestore => {
-    const rooms = getFirestoreCollections(firestore).rooms;
+    const { rooms, accountDeletions } = getFirestoreCollections(firestore);
     const ref = rooms.doc();
     const room: RoomDocument = { roomId: ref.id, ownerId: uid, name, createdAt: Timestamp.now() };
     const member = getRoomMembersCollection(ref.id, firestore).doc(uid);
     await firestore.runTransaction(async transaction => {
+      assertNoAccountDeletion(await transaction.get(accountDeletions.doc(uid)));
       transaction.create(ref, room);
       transaction.create(member, { uid, roomId: ref.id, role: 'host', joinedAt: room.createdAt });
     });
@@ -65,11 +67,17 @@ export async function deleteRoom(uid: string, roomId: string, db?: Firestore) {
 }
 export async function joinRoom(uid: string, roomId: string, db?: Firestore) {
   return withFirestore(async firestore => {
-    const room = await getFirestoreCollections(firestore).rooms.doc(roomId).get();
-    if (!room.exists) throw new AppError(404, 'ROOM_NOT_FOUND', 'La sala no existe.');
-    const data = room.data() as RoomDocument;
+    const { rooms, accountDeletions } = getFirestoreCollections(firestore);
+    const roomRef = rooms.doc(roomId);
     const memberRef = getRoomMembersCollection(roomId, firestore).doc(uid);
-    await memberRef.set({ uid, roomId, role: data.ownerId === uid ? 'host' : 'member', joinedAt: Timestamp.now() }, { merge: true });
+    const data = await firestore.runTransaction(async transaction => {
+      assertNoAccountDeletion(await transaction.get(accountDeletions.doc(uid)));
+      const room = await transaction.get(roomRef);
+      if (!room.exists) throw new AppError(404, 'ROOM_NOT_FOUND', 'La sala no existe.');
+      const roomData = room.data() as RoomDocument;
+      transaction.set(memberRef, { uid, roomId, role: roomData.ownerId === uid ? 'host' : 'member', joinedAt: Timestamp.now() }, { merge: true });
+      return roomData;
+    });
     return serialize(data, firestore);
   }, db);
 }

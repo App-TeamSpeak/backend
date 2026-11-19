@@ -35,7 +35,8 @@ export interface MemberDocument {
 export interface MessageDocument {
   messageId: string;
   roomId: string;
-  senderId: string;
+  senderId: string | null;
+  authorDeleted?: boolean;
   text: string;
   createdAt: Timestamp;
 }
@@ -44,7 +45,7 @@ export interface MessageDocument {
 // The document ID is the authenticated UID; no credentials or profile copies.
 export interface AccountDeletionDocument {
   status: 'pending' | 'completed' | 'blocked';
-  phase: 'auth' | 'firestore' | 'done';
+  phase: 'cleanup' | 'auth' | 'firestore' | 'done';
   usernameKeys: string[];
   requestedAt: Timestamp;
   updatedAt: Timestamp;
@@ -52,4 +53,7 @@ export interface AccountDeletionDocument {
   attempts: number;
   nextAttemptAt?: Timestamp;
   lastErrorCode?: string;
+  statusTokenHash?: string;
+  leaseOwner?: string;
+  leaseExpiresAt?: Timestamp;
 }

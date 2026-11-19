@@ -6,11 +6,14 @@ import type { AccountDeletionDocument } from './firestore.documents';
 
 const keySchema = z.string().min(8).max(30).regex(/^[a-z0-9_-]+$/);
 const markerSchema = z.object({
-  status: z.enum(['pending', 'blocked', 'completed']), phase: z.enum(['auth', 'firestore', 'done']),
+  status: z.enum(['pending', 'blocked', 'completed']), phase: z.enum(['cleanup', 'auth', 'firestore', 'done']),
   usernameKeys: z.array(keySchema).refine((keys) => new Set(keys).size === keys.length),
   requestedAt: z.instanceof(Timestamp), updatedAt: z.instanceof(Timestamp),
   attempts: z.number().int().nonnegative(), completedAt: z.instanceof(Timestamp).optional(),
   nextAttemptAt: z.instanceof(Timestamp).optional(), lastErrorCode: z.string().optional(),
+  statusTokenHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  leaseOwner: z.string().min(1).optional(),
+  leaseExpiresAt: z.instanceof(Timestamp).optional(),
 }).refine((data) => data.status === 'completed'
   ? data.phase === 'done' && data.completedAt !== undefined
   : data.phase !== 'done' && data.completedAt === undefined);
