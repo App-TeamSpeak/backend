@@ -3,6 +3,7 @@ import type { Auth } from 'firebase-admin/auth';
 import { Timestamp, type DocumentReference, type Firestore } from 'firebase-admin/firestore';
 import { getFirebaseAuth } from '../config/firebase';
 import { assertDeletionTestEnvironment, deletionTestProject } from '../config/deletion-test';
+import { isTransientAuthError } from '../middleware/auth';
 import { AppError } from '../middleware/errors';
 import { getFirestoreCollections, getRoomMembersCollection, getRoomMessagesCollection, withFirestore } from './firestore.service';
 import { parseAccountDeletion, readDeletionResources, assertOwnedReservation, deletionInconsistent } from './account-deletion.data';
@@ -65,57 +66,71 @@ async function commitBatchedWrites(
   }
 }
 
+function userResourceQueries(firestore: Firestore, uid: string) {
+  return {
+    ownedRooms: getFirestoreCollections(firestore).rooms.where('ownerId', '==', uid),
+    foreignMemberships: firestore.collectionGroup('members').where('uid', '==', uid),
+    foreignMessages: firestore.collectionGroup('messages').where('senderId', '==', uid),
+  };
+}
+
 async function cleanupUserRoomResources(firestore: Firestore, uid: string): Promise<void> {
-  const { rooms } = getFirestoreCollections(firestore);
-  const ownedRooms = await rooms.where('ownerId', '==', uid).get();
+  const queries = userResourceQueries(firestore, uid);
+  const ownedRooms = await queries.ownedRooms.get();
   for (const roomDoc of ownedRooms.docs) {
     const roomId = roomDoc.id;
     const [members, messages] = await Promise.all([
       getRoomMembersCollection(roomId, firestore).get(),
       getRoomMessagesCollection(roomId, firestore).get(),
     ]);
-    const ops: Array<(batch: ReturnType<Firestore['batch']>) => void> = [
+    await commitBatchedWrites(firestore, [
       ...members.docs.map((doc) => (batch: ReturnType<Firestore['batch']>) => batch.delete(doc.ref)),
       ...messages.docs.map((doc) => (batch: ReturnType<Firestore['batch']>) => batch.delete(doc.ref)),
       (batch) => batch.delete(roomDoc.ref),
-    ];
-    await commitBatchedWrites(firestore, ops);
+    ]);
   }
 
-  const foreignMemberships = await firestore.collectionGroup('members').where('uid', '==', uid).get();
-  if (!foreignMemberships.empty) {
-    await commitBatchedWrites(
-      firestore,
-      foreignMemberships.docs.map((doc) => (batch) => batch.delete(doc.ref)),
-    );
-  }
-
-  const foreignMessages = await firestore.collectionGroup('messages').where('senderId', '==', uid).get();
-  if (!foreignMessages.empty) {
-    await commitBatchedWrites(
-      firestore,
-      foreignMessages.docs.map((doc) => (batch) => batch.update(doc.ref as DocumentReference, { senderId: null, authorDeleted: true })),
-    );
-  }
+  const [foreignMemberships, foreignMessages] = await Promise.all([
+    queries.foreignMemberships.get(),
+    queries.foreignMessages.get(),
+  ]);
+  await commitBatchedWrites(firestore, [
+    ...foreignMemberships.docs.map((doc) => (batch: ReturnType<Firestore['batch']>) => batch.delete(doc.ref)),
+    ...foreignMessages.docs.map((doc) => (batch: ReturnType<Firestore['batch']>) => batch.update(doc.ref as DocumentReference, { senderId: null, authorDeleted: true })),
+  ]);
 }
 
 async function hasRemainingUserResources(firestore: Firestore, uid: string): Promise<boolean> {
+  const queries = userResourceQueries(firestore, uid);
   const [ownedRooms, foreignMemberships, foreignMessages] = await Promise.all([
-    getFirestoreCollections(firestore).rooms.where('ownerId', '==', uid).limit(1).get(),
-    firestore.collectionGroup('members').where('uid', '==', uid).limit(1).get(),
-    firestore.collectionGroup('messages').where('senderId', '==', uid).limit(1).get(),
+    queries.ownedRooms.limit(1).get(),
+    queries.foreignMemberships.limit(1).get(),
+    queries.foreignMessages.limit(1).get(),
   ]);
   return !ownedRooms.empty || !foreignMemberships.empty || !foreignMessages.empty;
-}
-
-function isTransientAuthError(error: unknown): boolean {
-  const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
-  return new Set<unknown>(['app/network-error', 'app/network-timeout', 'auth/network-request-failed', 'auth/too-many-requests', 'auth/quota-exceeded']).has(code);
 }
 
 function clearLease(doc: AccountDeletionDocument): AccountDeletionDocument {
   const { leaseOwner: _owner, leaseExpiresAt: _exp, ...rest } = doc;
   return rest;
+}
+
+async function withLeasedMarker(
+  firestore: Firestore,
+  markerRef: DocumentReference<AccountDeletionDocument>,
+  executionId: string,
+  update: (tx: FirebaseFirestore.Transaction, current: AccountDeletionDocument) => Promise<AccountDeletionDocument | null> | AccountDeletionDocument | null,
+): Promise<AccountDeletionDocument | null> {
+  return firestore.runTransaction(async (tx) => {
+    const snap = await tx.get(markerRef);
+    if (!snap.exists) return null;
+    const current = parseAccountDeletion(snap.data());
+    if (current.status !== 'pending' || current.leaseOwner !== executionId) return current;
+    const next = await update(tx, current);
+    if (!next) return current;
+    tx.set(markerRef, next);
+    return next;
+  });
 }
 
 export async function runAccountDeletionWithLease(
@@ -162,11 +177,7 @@ export async function runAccountDeletionWithLease(
         if (await hasRemainingUserResources(firestore, uid)) {
           await cleanupUserRoomResources(firestore, uid);
         }
-        const advanced = await firestore.runTransaction(async (tx) => {
-          const snap = await tx.get(markerRef);
-          if (!snap.exists) return null;
-          const current = parseAccountDeletion(snap.data());
-          if (current.status !== 'pending' || current.leaseOwner !== executionId) return current;
+        const advanced = await withLeasedMarker(firestore, markerRef, executionId, async (tx, current) => {
           const [profileSnap, ownedUsernames] = await Promise.all([
             tx.get(users.doc(uid)),
             tx.get(usernames.where('uid', '==', uid)),
@@ -174,15 +185,13 @@ export async function runAccountDeletionWithLease(
           if (profileSnap.exists) tx.delete(users.doc(uid));
           for (const reservation of ownedUsernames.docs) tx.delete(reservation.ref);
           const now = nowFn();
-          const updated: AccountDeletionDocument = {
+          return {
             ...current,
             phase: 'auth',
             usernameKeys: [],
             updatedAt: now,
             leaseExpiresAt: Timestamp.fromMillis(now.toMillis() + LEASE_TTL_MS),
           };
-          tx.set(markerRef, updated);
-          return updated;
         });
         if (!advanced || advanced.status === 'completed') return 'completed';
         if (advanced.leaseOwner !== executionId) return 'pending';
@@ -198,12 +207,7 @@ export async function runAccountDeletionWithLease(
           const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
           if (code !== 'auth/user-not-found') throw error;
         }
-        const completed = await firestore.runTransaction(async (tx) => {
-          const snap = await tx.get(markerRef);
-          if (!snap.exists) return null;
-          const current = parseAccountDeletion(snap.data());
-          if (current.status === 'completed') return current;
-          if (current.leaseOwner !== executionId) return current;
+        const completed = await withLeasedMarker(firestore, markerRef, executionId, (_tx, current) => {
           const now = nowFn();
           const done: AccountDeletionDocument = clearLease({
             ...current,
@@ -215,7 +219,6 @@ export async function runAccountDeletionWithLease(
           });
           delete done.lastErrorCode;
           delete done.nextAttemptAt;
-          tx.set(markerRef, done);
           return done;
         });
         return completed?.status === 'completed' ? 'completed' : 'pending';
@@ -227,21 +230,16 @@ export async function runAccountDeletionWithLease(
         || [4, 8, 10, 14, 'deadline-exceeded', 'resource-exhausted', 'aborted', 'unavailable'].includes(
           typeof error === 'object' && error !== null && 'code' in error ? (error as { code: unknown }).code as never : undefined as never,
         );
-      await firestore.runTransaction(async (tx) => {
-        const snap = await tx.get(markerRef);
-        if (!snap.exists) return;
-        const current = parseAccountDeletion(snap.data());
-        if (current.status !== 'pending' || current.leaseOwner !== executionId) return;
+      await withLeasedMarker(firestore, markerRef, executionId, (_tx, current) => {
         const now = nowFn();
         const backoffSec = Math.min(3600, 30 * 2 ** Math.min(admission.attempts - 1, 7));
-        const updated: AccountDeletionDocument = clearLease({
+        return clearLease({
           ...current,
           status: transient ? 'pending' : 'blocked',
           lastErrorCode: transient ? 'DELETION_TRANSIENT_FAILURE' : 'DELETION_FAILED',
           updatedAt: now,
           ...(transient ? { nextAttemptAt: Timestamp.fromMillis(now.toMillis() + backoffSec * 1000) } : {}),
         });
-        tx.set(markerRef, updated);
       }).catch(() => undefined);
       return 'pending';
     }
