@@ -20,12 +20,12 @@ describe('user profile validation', () => {
 
 describe('partial profile validation', () => {
   it('keeps omitted avatar absent and normalizes requested fields', () => {
-    expect(userPatchSchema.parse({ nombre: ' Ana ', username: ' Ana-User1 ' })).toEqual({ nombre: 'Ana', username: 'Ana-User1' });
+    expect(userPatchSchema.parse({ nombre: ' Ana ', username: ' Ana-User1 ', email: ' ANA@Example.com ' })).toEqual({ nombre: 'Ana', username: 'Ana-User1', email: 'ana@example.com' });
   });
   it('distinguishes explicit null from omission', () => {
     expect(userPatchSchema.parse({ avatarUrl: null })).toEqual({ avatarUrl: null });
   });
-  it.each([{}, { avatarUrl: undefined }, { uid: 'other' }, { nombre: null }, { username: 'Ana User1' }])('rejects invalid patches %j', (input) => {
+  it.each([{}, { avatarUrl: undefined }, { uid: 'other' }, { nombre: null }, { email: 'not-an-email' }, { username: 'Ana User1' }])('rejects invalid patches %j', (input) => {
     expect(userPatchSchema.safeParse(input).success).toBe(false);
   });
 });
