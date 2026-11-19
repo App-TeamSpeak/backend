@@ -52,7 +52,7 @@ export async function createUserProfile(identity: UserIdentity, input: UserBody,
   if (!identity.email || !z.email().safeParse(identity.email).success) {
     throw new AppError(400, 'AUTH_EMAIL_REQUIRED', 'La identidad autenticada debe incluir un correo válido.');
   }
-  const email = identity.email;
+  const email = identity.email.trim().toLowerCase();
   return withFirestore(async (firestore) => {
     const { users, usernames, accountDeletions } = getFirestoreCollections(firestore);
     const profileRef = users.doc(identity.uid);
@@ -133,11 +133,20 @@ export async function updateUserProfile(identity: UserIdentity, input: UserPatch
           throw new AppError(409, 'USERNAME_TAKEN', 'El username no está disponible.');
         }
       }
+      const nextEmail = patch.email?.toLowerCase();
+      const emailChanged = nextEmail !== undefined && nextEmail !== profile.email.toLowerCase();
+      if (emailChanged) {
+        const emailMatches = await transaction.get(users.where('email', '==', nextEmail).limit(2));
+        if (emailMatches.docs.some((doc) => doc.id !== identity.uid)) {
+          throw new AppError(409, 'EMAIL_TAKEN', 'El correo electrónico no está disponible.');
+        }
+      }
       const changes: UserPatch = {};
       for (const field of ['nombre', 'apellido', 'username', 'avatarUrl'] as const) {
         const value = patch[field];
         if (value !== undefined && value !== profile[field]) Object.assign(changes, { [field]: value });
       }
+      if (emailChanged && nextEmail) changes.email = nextEmail;
       if (!Object.keys(changes).length) {
         return { uid: identity.uid, profileStatus: 'complete' as const, profile: serialize(profile) };
       }

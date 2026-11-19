@@ -51,7 +51,15 @@ export const openapi = {
         type: 'object', additionalProperties: false, required: ['nombre', 'apellido', 'username'],
         properties: userInputProperties,
       },
-      UserPatch: { type: 'object', additionalProperties: false, minProperties: 1, properties: userInputProperties },
+      UserPatch: {
+        type: 'object',
+        additionalProperties: false,
+        minProperties: 1,
+        properties: {
+          ...userInputProperties,
+          email: { type: 'string', format: 'email', description: 'Correo electrónico único normalizado en minúsculas.' },
+        },
+      },
       UserProfile: userProfileSchema,
       UserResponse: {
         type: 'object', required: ['success', 'data'],
@@ -145,13 +153,13 @@ export const openapi = {
       },
       patch: {
         tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Actualiza parcialmente el perfil autenticado',
-        description: 'Requiere email_verified=true en el ID token; de lo contrario 403 EMAIL_NOT_VERIFIED. Solo nombre, apellido, username y avatarUrl. Campos omitidos se conservan; omitir avatarUrl conserva el avatar actual y avatarUrl null lo elimina. El cambio de username mueve la reserva atómicamente. Mayúsculas solo cambian presentación. Valores equivalentes tras normalizar no generan escrituras ni cambian updatedAt. Requiere perfil completo (403 PROFILE_INCOMPLETE si falta o está incompleto) y reserva consistente. Cache-Control: no-store.',
+        description: 'Requiere email_verified=true en el ID token; de lo contrario 403 EMAIL_NOT_VERIFIED. Solo nombre, apellido, username, email y avatarUrl. Campos omitidos se conservan; omitir avatarUrl conserva el avatar actual y avatarUrl null lo elimina. El cambio de username mueve la reserva atómicamente y el cambio de email valida unicidad en Firestore. Mayúsculas solo cambian presentación. Valores equivalentes tras normalizar no generan escrituras ni cambian updatedAt. Requiere perfil completo (403 PROFILE_INCOMPLETE si falta o está incompleto) y reserva consistente. Cache-Control: no-store.',
         requestBody: {
           required: true, content: { 'application/json': {
             schema: { $ref: '#/components/schemas/UserPatch' },
             examples: {
               nombre: { value: { nombre: 'Ana María' } },
-              varios: { value: { nombre: 'Ana María', apellido: 'Pérez', username: 'Ana-User2', avatarUrl: null } },
+              varios: { value: { nombre: 'Ana María', apellido: 'Pérez', username: 'Ana-User2', email: 'ana.nueva@universidad.edu', avatarUrl: null } },
               quitarAvatar: { value: { avatarUrl: null } },
             },
           } },
@@ -162,7 +170,7 @@ export const openapi = {
           400: { description: 'VALIDATION_ERROR o INVALID_JSON', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           401: { description: 'AUTH_REQUIRED o AUTH_INVALID', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           404: { description: 'PROFILE_NOT_FOUND: el perfil desapareció después de autorizar la solicitud; completar registro mediante POST', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          409: { description: 'USERNAME_TAKEN o PROFILE_INCONSISTENT', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          409: { description: 'USERNAME_TAKEN, EMAIL_TAKEN o PROFILE_INCONSISTENT', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           500: { description: 'INTERNAL_ERROR', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           503: { description: 'AUTH_UNAVAILABLE o FIRESTORE_UNAVAILABLE', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
