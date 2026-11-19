@@ -65,7 +65,9 @@ describe('DELETE intent with real Authentication and Firestore emulators', () =>
     expect(after.markers[0]).toMatchObject({ id: identity.uid, status: 'completed', phase: 'done', usernameKeys: [], attempts: 1 });
     expect((await db.doc(`accountDeletions/${identity.uid}`).get()).data()?.requestedAt).toBeInstanceOf(Timestamp);
     await expect(auth.getUser(identity.uid)).rejects.toMatchObject({ code: 'auth/user-not-found' });
-    expect((await request(app).get('/api/users/me').set('Authorization', `Bearer ${idToken}`)).status).toBe(403);
+    const privateAccess = await request(app).get('/api/users/me').set('Authorization', `Bearer ${idToken}`);
+    expect(privateAccess.status).toBe(401);
+    expect(privateAccess.body).toMatchObject({ success: false, code: 'AUTH_INVALID' });
   });
 
   it('beginAccountDeletion: repeats without changing progress or document updateTime', async () => {
