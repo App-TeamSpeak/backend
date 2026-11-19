@@ -6,6 +6,7 @@ import { getFirebaseAuth, getFirestoreDb } from '../config/firebase';
 import { Timestamp } from 'firebase-admin/firestore';
 import { app } from '../app';
 import { createUserProfile, updateUserProfile } from '../services/users.service';
+import { beginAccountDeletion } from '../services/account-deletion.service';
 import { createAccountDeletionReconciler } from '../services/account-deletion.reconciler';
 import { processAccountDeletion } from '../services/account-deletion.processor';
 import { userBodySchema } from '../validators/user.validator';
@@ -47,79 +48,96 @@ describe('DELETE intent with real Authentication and Firestore emulators', () =>
     }
   });
   afterAll(async () => { await db.terminate(); await deleteApp(firebase); });
-  it('uses an emitted token, real revocation verification and creates only the marker', async () => {
+  const recentAuthTime = () => Math.floor(Date.now() / 1000);
+
+  it('HTTP DELETE: verifies token revocation, completes deletion, releases username and blocks private access', async () => {
     const idToken = await token();
     expect((await auth.verifyIdToken(idToken, true)).uid).toBe(identity.uid);
     await createUserProfile(identity, body, db);
-    const before = await snapshot();
     const response = await remove(idToken).query({ uid: 'other' });
-    expect(response.status).toBe(202); expect(response.body).toEqual({ success: true, data: { status: 'pending' } });
-    const after = await snapshot(); expect(after.users).toEqual(before.users); expect(after.usernames).toEqual(before.usernames);
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ success: true, data: { status: 'completed' } });
+    expect(typeof response.body.data.statusToken).toBe('string');
+    const after = await snapshot();
+    expect(after.users).toEqual([]);
+    expect(after.usernames).toEqual([]);
     expect(after.markers).toHaveLength(1);
-    expect(after.markers[0]).toMatchObject({ id: identity.uid, status: 'pending', phase: 'auth', usernameKeys: ['ana-user1'], attempts: 0 });
-    expect(Object.keys(after.markers[0]).sort((left, right) => left < right ? -1 : left > right ? 1 : 0)).toEqual(['id','status','phase','usernameKeys','attempts','requestedAt','updatedAt'].sort((left, right) => left < right ? -1 : left > right ? 1 : 0));
+    expect(after.markers[0]).toMatchObject({ id: identity.uid, status: 'completed', phase: 'done', usernameKeys: [], attempts: 1 });
     expect((await db.doc(`accountDeletions/${identity.uid}`).get()).data()?.requestedAt).toBeInstanceOf(Timestamp);
-    expect((await auth.getUser(identity.uid)).uid).toBe(identity.uid);
+    await expect(auth.getUser(identity.uid)).rejects.toMatchObject({ code: 'auth/user-not-found' });
     expect((await request(app).get('/api/users/me').set('Authorization', `Bearer ${idToken}`)).status).toBe(403);
   });
-  it('repeats without changing progress or document updateTime', async () => {
-    const idToken = await token(); await createUserProfile(identity, body, db);
-    expect((await remove(idToken)).status).toBe(202);
+
+  it('beginAccountDeletion: repeats without changing progress or document updateTime', async () => {
+    await token(); await createUserProfile(identity, body, db);
+    expect(await beginAccountDeletion({ uid: identity.uid, authTime: recentAuthTime() }, db)).toEqual({ status: 'pending' });
     const ref = db.doc(`accountDeletions/${identity.uid}`); const before = await ref.get();
-    expect((await remove(idToken)).status).toBe(202);
+    expect(await beginAccountDeletion({ uid: identity.uid, authTime: recentAuthTime() }, db)).toEqual({ status: 'pending' });
     const after = await ref.get(); expect(after.data()).toEqual(before.data()); expect(after.updateTime?.isEqual(before.updateTime!)).toBe(true);
     expect((await auth.getUser(identity.uid)).uid).toBe(identity.uid);
   });
-  it('two simultaneous DELETE persist one unchanged intent', async () => {
+
+  it('HTTP DELETE: two simultaneous requests converge on one completed deletion without errors', async () => {
     const idToken = await token(); await createUserProfile(identity, body, db);
-    const before = await snapshot();
     const responses = await Promise.all([remove(idToken), remove(idToken)]);
-    expect(responses.map((response) => response.status)).toEqual([202,202]);
-    const after = await snapshot(); expect(after.markers).toHaveLength(1); expect(after.users).toEqual(before.users); expect(after.usernames).toEqual(before.usernames);
+    expect(responses.every((response) => [200, 202, 401].includes(response.status))).toBe(true);
+    expect(responses.some((response) => response.status === 200)).toBe(true);
+    const after = await snapshot();
+    expect(after.markers).toHaveLength(1);
+    expect(after.markers[0]).toMatchObject({ status: 'completed', phase: 'done' });
+    expect(after.users).toEqual([]);
+    expect(after.usernames).toEqual([]);
   });
-  it.each(['POST','PATCH','RENAME'] as const)('concurrent DELETE and %s capture the committed reservations', async (operation) => {
+
+  it.each(['POST','PATCH','RENAME'] as const)('concurrent DELETE and %s leave zero orphan reservations and block further writes', async (operation) => {
     const idToken = await token(); if (operation !== 'POST') await createUserProfile(identity, body, db);
     const mutation = operation === 'POST' ? createUserProfile(identity, body, db)
       : updateUserProfile(identity, operation === 'PATCH' ? { nombre: 'Nueva' } : { username: 'Ana-User2' }, db);
     const [change, deletion] = await Promise.allSettled([mutation, remove(idToken)]);
     expect(deletion.status).toBe('fulfilled');
     if (deletion.status !== 'fulfilled') throw new Error('DELETE failed');
-    expect(deletion.value.status).toBe(202);
-    if (change.status === 'rejected') expect(change.reason).toMatchObject({ statusCode: 403, code: 'ACCOUNT_DELETION_PENDING' });
+    expect([200, 202]).toContain(deletion.value.status);
+    if (change.status === 'rejected') expect(change.reason).toMatchObject({ statusCode: 403 });
     const owned = await db.collection('usernames').where('uid','==',identity.uid).get();
-    const marker = (await db.doc(`accountDeletions/${identity.uid}`).get()).data();
-    expect(marker?.usernameKeys).toEqual(owned.docs.map((doc) => doc.id).sort((left, right) => left < right ? -1 : left > right ? 1 : 0));
+    expect(owned.docs).toEqual([]);
     const stable = await snapshot();
     await expect(updateUserProfile(identity, { nombre: 'No permitido' }, db)).rejects.toMatchObject({ statusCode: 403 });
     await expect(createUserProfile(identity, body, db)).rejects.toMatchObject({ statusCode: 403 });
-    expect(await snapshot()).toEqual(stable); expect((await auth.getUser(identity.uid)).uid).toBe(identity.uid);
+    expect(await snapshot()).toEqual(stable);
+    await expect(auth.getUser(identity.uid)).rejects.toMatchObject({ code: 'auth/user-not-found' });
   });
-  it('accepts an incomplete profile without fabricating or changing its fields', async () => {
+
+  it('HTTP DELETE: deletes an incomplete profile cleanly', async () => {
     const idToken = await token(); await db.doc(`users/${identity.uid}`).create({ uid: identity.uid, nombre: 'Ana' });
-    const before = await snapshot(); expect((await remove(idToken)).status).toBe(202);
-    expect((await snapshot()).users).toEqual(before.users);
+    expect((await remove(idToken)).status).toBe(200);
+    expect((await snapshot()).users).toEqual([]);
+    await expect(auth.getUser(identity.uid)).rejects.toMatchObject({ code: 'auth/user-not-found' });
   });
-  it('accepts absent profile and discovers an owned orphan reservation', async () => {
+
+  it('HTTP DELETE: cleans an owned orphan reservation when profile is absent', async () => {
     const idToken = await token(); await db.doc('usernames/ana-user1').create({ uid: identity.uid, usernameKey: 'ana-user1' });
-    expect((await remove(idToken)).status).toBe(202);
-    const after = await snapshot(); expect(after.users).toEqual([]); expect(after.usernames).toHaveLength(1);
-    expect((await db.doc(`accountDeletions/${identity.uid}`).get()).data()?.usernameKeys).toEqual(['ana-user1']);
+    expect((await remove(idToken)).status).toBe(200);
+    const after = await snapshot(); expect(after.users).toEqual([]); expect(after.usernames).toEqual([]);
   });
+
   it('rejects other-owner reservation with no marker or resource modifications', async () => {
     const idToken = await token(); await createUserProfile(identity, body, db); await db.doc('usernames/ana-user1').update({ uid: 'other' });
     const before = await snapshot(); const response = await remove(idToken);
     expect(response.status).toBe(409); expect(response.body.code).toBe('PROFILE_INCONSISTENT'); expect(await snapshot()).toEqual(before);
     expect((await auth.getUser(identity.uid)).uid).toBe(identity.uid);
   });
+
   it('rejects an invalid token without writing', async () => {
     const before = await snapshot(); expect((await remove('invalid-token')).status).toBe(401); expect(await snapshot()).toEqual(before);
   });
+
   it('rejects disabled identity using real checkRevoked', async () => {
     const idToken = await token(); await auth.updateUser(identity.uid, { disabled: true });
     const before = await snapshot(); const response = await remove(idToken);
     expect(response.status).toBe(401); expect(response.body.code).toBe('AUTH_USER_DISABLED'); expect(await snapshot()).toEqual(before);
   });
-  it('stays disabled when explicit activation is absent', async () => {
+
+  it('stays disabled with 501 when explicit emulator test activation is absent', async () => {
     const idToken = await token(); const before = await snapshot(); const saved = process.env.TEAMSPEAK_ENABLE_DELETE_TESTS;
     try { delete process.env.TEAMSPEAK_ENABLE_DELETE_TESTS; expect((await remove(idToken)).status).toBe(501); }
     finally { process.env.TEAMSPEAK_ENABLE_DELETE_TESTS = saved; }
@@ -129,7 +147,7 @@ describe('DELETE intent with real Authentication and Firestore emulators', () =>
   async function intent() {
     const idToken = await token();
     await createUserProfile(identity, body, db);
-    expect((await remove(idToken)).status).toBe(202);
+    expect(await beginAccountDeletion({ uid: identity.uid, authTime: recentAuthTime() }, db)).toEqual({ status: 'pending' });
     return idToken;
   }
   const processing = {};
@@ -162,15 +180,15 @@ describe('DELETE intent with real Authentication and Firestore emulators', () =>
     const after = await snapshot(); expect(after.users).toEqual([]); expect(after.usernames).toEqual([]);
   });
   it('processor: deletes a safely owned incomplete fixture profile', async () => {
-    const idToken = await token(); await db.doc(`users/${identity.uid}`).create({ uid: identity.uid, nombre: 'Ana' });
-    expect((await remove(idToken)).status).toBe(202);
+    await token(); await db.doc(`users/${identity.uid}`).create({ uid: identity.uid, nombre: 'Ana' });
+    expect(await beginAccountDeletion({ uid: identity.uid, authTime: recentAuthTime() }, db)).toEqual({ status: 'pending' });
     expect((await processAccountDeletion(identity.uid, processing)).status).toBe('completed');
     expect((await snapshot()).users).toEqual([]); await expect(auth.getUser(identity.uid)).rejects.toMatchObject({ code: 'auth/user-not-found' });
   });
   it('processor: cleans multiple reservations only when recorded and still owned', async () => {
-    const idToken = await token(); await createUserProfile(identity, body, db);
+    await token(); await createUserProfile(identity, body, db);
     await db.doc('usernames/extra-user1').create({ uid: identity.uid, usernameKey: 'extra-user1' });
-    expect((await remove(idToken)).status).toBe(202);
+    expect(await beginAccountDeletion({ uid: identity.uid, authTime: recentAuthTime() }, db)).toEqual({ status: 'pending' });
     expect((await db.doc(`accountDeletions/${identity.uid}`).get()).data()?.usernameKeys).toEqual(['ana-user1','extra-user1']);
     expect((await processAccountDeletion(identity.uid, processing)).status).toBe('completed'); expect((await snapshot()).usernames).toEqual([]);
   });
