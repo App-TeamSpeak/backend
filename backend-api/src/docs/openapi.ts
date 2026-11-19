@@ -89,7 +89,8 @@ export const openapi = {
         properties: {
           id: { type: 'string', example: 'message_01HXYZ' },
           roomId: { type: 'string', example: 'room_01HXYZ' },
-          authorId: { type: 'string', example: 'firebase-user-id' },
+          authorId: { type: 'string', nullable: true, example: 'firebase-user-id', description: 'null cuando el autor eliminó su cuenta (authorDeleted=true).' },
+          authorDeleted: { type: 'boolean', description: 'true si el autor eliminó su cuenta. Limitación: el texto del mensaje se conserva sin redacción automática.' },
           text: { type: 'string', maxLength: 2000, example: '¿Revisamos el ejercicio 3?' },
           createdAt: { type: 'string', format: 'date-time' },
         },
@@ -176,17 +177,37 @@ export const openapi = {
         },
       },
       delete: {
-        tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Elimina definitivamente la cuenta autenticada',
-        description: 'Elimina la cuenta en Firebase Authentication, el documento del usuario en Firestore, libera las reservas de username y elimina las salas propias con sus miembros y mensajes asociados. No admite cuerpo. Cache-Control: no-store.',
+        tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Solicita y ejecuta la eliminación definitiva y recuperable de la cuenta',
+        description: 'Exige revocación y auth_time <= 300s (401 AUTH_RECENT_REQUIRED) para solicitudes nuevas; reintentos de una solicitud pending no exigen reautenticación. Ejecuta fases pending -> cleanup -> auth -> completed con lease distribuido. Elimina salas propias (y subcolecciones), membresías ajenas, anonimiza mensajes en salas ajenas (senderId=null, authorDeleted=true), elimina perfil y reservas de username, y elimina identidad en Firebase Auth. Devuelve statusToken opaco para consultar el resultado definitivo incluso tras eliminar la identidad en Auth. No admite cuerpo. Cache-Control: no-store.',
         responses: {
           200: { description: 'Cuenta eliminada definitivamente', content: { 'application/json': { schema: {
-            type: 'object', required: ['success', 'data'], properties: { success: { type: 'boolean', enum: [true] }, data: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['deleted'] } } } },
-          }, example: { success: true, data: { status: 'deleted' } } } } },
+            type: 'object', required: ['success', 'data'], properties: { success: { type: 'boolean', enum: [true] }, data: { type: 'object', required: ['status', 'statusToken'], properties: { status: { type: 'string', enum: ['completed'] }, statusToken: { type: 'string' } } } },
+          }, example: { success: true, data: { status: 'completed', statusToken: 'opaque-status-token' } } } } },
+          202: { description: 'Eliminación en progreso (recuperable por reintento o reconciliador)', content: { 'application/json': { schema: {
+            type: 'object', required: ['success', 'data'], properties: { success: { type: 'boolean', enum: [true] }, data: { type: 'object', required: ['status', 'statusToken'], properties: { status: { type: 'string', enum: ['pending'] }, statusToken: { type: 'string' } } } },
+          }, example: { success: true, data: { status: 'pending', statusToken: 'opaque-status-token' } } } } },
           400: { description: 'VALIDATION_ERROR (cuerpo no permitido) o INVALID_JSON' },
-          401: { description: 'AUTH_REQUIRED o AUTH_INVALID' },
-          409: { description: 'ACCOUNT_DELETION_BLOCKED, ACCOUNT_DELETED o ACCOUNT_DELETION_INCONSISTENT' },
+          401: { description: 'AUTH_REQUIRED, AUTH_INVALID, AUTH_EXPIRED, AUTH_REVOKED, AUTH_USER_DISABLED, AUTH_USER_DELETED o AUTH_RECENT_REQUIRED' },
+          409: { description: 'ACCOUNT_DELETION_BLOCKED, ACCOUNT_DELETION_INCONSISTENT o PROFILE_INCONSISTENT' },
           503: { description: 'AUTH_UNAVAILABLE o FIRESTORE_UNAVAILABLE' },
           500: { description: 'INTERNAL_ERROR' },
+        },
+      },
+    },
+    '/api/users/me/deletion-status': {
+      get: {
+        tags: ['Users'],
+        summary: 'Consulta segura del estado definitivo de eliminación',
+        description: 'Permite verificar el resultado tras perder la respuesta HTTP o después de eliminar la identidad en Firebase Auth usando el header X-Deletion-Status-Token (o Bearer token mientras Auth siga activo). No expone datos privados ni permite enumeración.',
+        parameters: [
+          { name: 'X-Deletion-Status-Token', in: 'header', required: false, schema: { type: 'string' }, description: 'Token opaco devuelto por DELETE /api/users/me.' },
+        ],
+        responses: {
+          200: { description: 'Estado de la solicitud de eliminación', content: { 'application/json': { schema: {
+            type: 'object', required: ['success', 'data'], properties: { success: { type: 'boolean', enum: [true] }, data: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['none', 'pending', 'blocked', 'completed'] } } } },
+          } } } },
+          401: { description: 'AUTH_REQUIRED o AUTH_INVALID' },
+          404: { description: 'DELETION_STATUS_NOT_FOUND' },
         },
       },
     },

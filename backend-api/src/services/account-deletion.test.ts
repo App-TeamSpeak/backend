@@ -2,76 +2,107 @@ import request from 'supertest';
 import { Timestamp, type Firestore } from 'firebase-admin/firestore';
 import type { Auth } from 'firebase-admin/auth';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
 const config = vi.hoisted(() => ({ getFirebaseAuth: vi.fn(), getFirestoreDb: vi.fn(), verify: vi.fn(), deleteUser: vi.fn() }));
 vi.mock('../config/firebase', () => ({ getFirebaseAuth: config.getFirebaseAuth, getFirestoreDb: config.getFirestoreDb }));
+
 import { app } from '../app';
-import { beginAccountDeletion, deleteAccountImmediately } from './account-deletion.service';
+import { beginAccountDeletion, getAccountDeletionStatus, requestAccountDeletion, runAccountDeletionWithLease } from './account-deletion.service';
 
 const projectId = 'demo-teamspeak-tests';
 const uid = 'user-a';
 const seconds = 1800000000;
 const now = Timestamp.fromMillis(seconds * 1000);
-const marker = { status: 'pending', phase: 'auth', usernameKeys: ['ana-user1'], requestedAt: now, updatedAt: now, attempts: 0 };
 const profile = { uid, username: 'Ana-User1', usernameKey: 'ana-user1', nombre: 'Ana' };
 
 function database() {
   const data = new Map<string, Record<string, unknown>>([
     [`users/${uid}`, profile],
+    ['users/user-b', { uid: 'user-b', username: 'Bob-User1' }],
     ['usernames/ana-user1', { uid, usernameKey: 'ana-user1' }],
-    ['rooms/room-1', { roomId: 'room-1', ownerId: uid, name: 'Mi sala' }],
-    ['rooms/room-1/members/user-a', { uid, roomId: 'room-1', role: 'host' }],
-    ['rooms/room-1/messages/msg-1', { messageId: 'msg-1', roomId: 'room-1', senderId: uid, text: 'hola' }],
+    ['usernames/bob-user1', { uid: 'user-b', usernameKey: 'bob-user1' }],
+    ['rooms/room-owned', { roomId: 'room-owned', ownerId: uid, name: 'Sala propia' }],
+    ['rooms/room-owned/members/user-a', { uid, roomId: 'room-owned', role: 'host' }],
+    ['rooms/room-owned/messages/m-own', { messageId: 'm-own', roomId: 'room-owned', senderId: uid, text: 'propio' }],
+    ['rooms/room-foreign', { roomId: 'room-foreign', ownerId: 'user-b', name: 'Sala ajena' }],
+    ['rooms/room-foreign/members/user-a', { uid, roomId: 'room-foreign', role: 'member' }],
+    ['rooms/room-foreign/members/user-b', { uid: 'user-b', roomId: 'room-foreign', role: 'host' }],
+    ['rooms/room-foreign/messages/m-1', { messageId: 'm-1', roomId: 'room-foreign', senderId: uid, text: 'mensaje en sala ajena' }],
+    ['rooms/room-foreign/messages/m-2', { messageId: 'm-2', roomId: 'room-foreign', senderId: 'user-b', text: 'mensaje de otro' }],
   ]);
-  const reads: string[] = [];
-  const create = vi.fn((ref: { path: string }, value: Record<string, unknown>) => { data.set(ref.path, value); });
-  const set = vi.fn((ref: { path: string }, value: Record<string, unknown>) => { data.set(ref.path, value); });
-  const del = vi.fn((ref: { path: string }) => { data.delete(ref.path); });
+
   const docRef = (path: string) => ({
     path,
     id: path.split('/').at(-1)!,
     get: async () => get({ path }),
     collection: (sub: string) => collection(`${path}/${sub}`),
   });
-  const get = vi.fn(async (ref: { path?: string; queryCollection?: string; queryUid?: string }) => {
-    reads.push(ref.path ?? `query:${ref.queryCollection}:${ref.queryUid}`);
-    if (ref.queryCollection === 'usernames') {
-      return {
-        docs: [...data]
-          .filter(([path, value]) => path.startsWith('usernames/') && value.uid === ref.queryUid)
-          .map(([path, value]) => ({ id: path.split('/')[1], ref: docRef(path), data: () => value })),
-      };
-    }
-    if (ref.queryCollection === 'rooms') {
-      return {
-        docs: [...data]
-          .filter(([path, value]) => path.startsWith('rooms/') && path.split('/').length === 2 && value.ownerId === ref.queryUid)
-          .map(([path, value]) => ({ id: path.split('/')[1], ref: docRef(path), data: () => value })),
-      };
+  const create = vi.fn((ref: { path: string }, value: Record<string, unknown>) => { data.set(ref.path, value); });
+  const set = vi.fn((ref: { path: string }, value: Record<string, unknown>) => { data.set(ref.path, value); });
+  const del = vi.fn((ref: { path: string }) => { data.delete(ref.path); });
+
+  const matchQuery = (kind: string, field: string, value: unknown) => {
+    let entries = [...data.entries()];
+    if (kind === 'usernames') entries = entries.filter(([p]) => p.startsWith('usernames/'));
+    else if (kind === 'rooms') entries = entries.filter(([p]) => p.startsWith('rooms/') && p.split('/').length === 2);
+    else if (kind === 'accountDeletions') entries = entries.filter(([p]) => p.startsWith('accountDeletions/'));
+    else if (kind === 'group:members') entries = entries.filter(([p]) => /^rooms\/[^/]+\/members\/[^/]+$/.test(p));
+    else if (kind === 'group:messages') entries = entries.filter(([p]) => /^rooms\/[^/]+\/messages\/[^/]+$/.test(p));
+    return entries.filter(([, v]) => v[field] === value);
+  };
+
+  const get = vi.fn(async (ref: { path?: string; queryKind?: string; field?: string; value?: unknown }) => {
+    if (ref.queryKind) {
+      const docs = matchQuery(ref.queryKind, ref.field!, ref.value).map(([p, v]) => ({
+        id: p.split('/').at(-1)!,
+        ref: docRef(p),
+        data: () => v,
+      }));
+      return { empty: docs.length === 0, size: docs.length, docs };
     }
     return { exists: data.has(ref.path!), data: () => data.get(ref.path!) };
   });
+
+  const makeQuery = (queryKind: string, field: string, value: unknown) => ({
+    queryKind,
+    field,
+    value,
+    limit: () => ({ queryKind, field, value, get: () => get({ queryKind, field, value }) }),
+    get: () => get({ queryKind, field, value }),
+  });
+
   const collection = (prefix: string) => ({
     doc: (id: string) => docRef(`${prefix}/${id}`),
-    where: (_field: string, _operator: string, queryUid: string) => ({
-      queryCollection: prefix,
-      queryUid,
-      get: () => get({ queryCollection: prefix, queryUid }),
-    }),
-    get: async () => ({
-      docs: [...data]
-        .filter(([path]) => path.startsWith(`${prefix}/`) && path.split('/').length === prefix.split('/').length + 1)
-        .map(([path, value]) => ({ id: path.split('/').at(-1)!, ref: docRef(path), data: () => value })),
-    }),
+    where: (field: string, _op: string, value: unknown) => makeQuery(prefix, field, value),
+    get: async () => {
+      const docs = [...data.entries()]
+        .filter(([p]) => p.startsWith(`${prefix}/`) && p.split('/').length === prefix.split('/').length + 1)
+        .map(([p, v]) => ({ id: p.split('/').at(-1)!, ref: docRef(p), data: () => v }));
+      return { empty: docs.length === 0, size: docs.length, docs };
+    },
   });
-  const batchDelete = vi.fn((ref: { path: string }) => { data.delete(ref.path); });
-  const batch = () => ({ delete: batchDelete, commit: vi.fn(async () => undefined) });
+
+  const batch = () => {
+    const ops: Array<() => void> = [];
+    return {
+      delete: (ref: { path: string }) => { ops.push(() => { data.delete(ref.path); }); },
+      update: (ref: { path: string }, patch: Record<string, unknown>) => {
+        ops.push(() => { const prev = data.get(ref.path); if (prev) data.set(ref.path, { ...prev, ...patch }); });
+      },
+      commit: vi.fn(async () => { ops.forEach((op) => op()); }),
+    };
+  };
+
   const db = {
     projectId,
     collection,
+    collectionGroup: (name: string) => ({
+      where: (field: string, _op: string, value: unknown) => makeQuery(`group:${name}`, field, value),
+    }),
     batch,
     runTransaction: vi.fn(async (fn: (tx: { get: typeof get; create: typeof create; set: typeof set; delete: typeof del }) => unknown) => fn({ get, create, set, delete: del })),
   };
-  return { db: db as unknown as Firestore, data, reads, create, set, del, get, runTransaction: db.runTransaction };
+  return { db: db as unknown as Firestore, data, create, set, del, get };
 }
 
 let fake: ReturnType<typeof database>;
@@ -90,40 +121,89 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 const remove = () => request(app).delete('/api/users/me').set('Authorization', 'Bearer synthetic');
 
-describe('US-05 complete account deletion', () => {
-  it('deletes Auth user, Firestore profile, username reservations, owned rooms/messages, and marks completed', async () => {
+describe('US-05 recoverable & complete account deletion', () => {
+  it('executes full cleanup (owned rooms, foreign memberships, anonymized foreign messages, profile, usernames, Auth) and returns statusToken', async () => {
     const response = await remove();
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ success: true, data: { status: 'deleted' } });
+    expect(response.body.success).toBe(true);
+    expect(response.body.data.status).toBe('completed');
+    expect(typeof response.body.data.statusToken).toBe('string');
+
     expect(config.deleteUser).toHaveBeenCalledExactlyOnceWith(uid);
     expect(fake.data.has(`users/${uid}`)).toBe(false);
     expect(fake.data.has('usernames/ana-user1')).toBe(false);
-    expect(fake.data.has('rooms/room-1')).toBe(false);
-    expect(fake.data.has('rooms/room-1/members/user-a')).toBe(false);
-    expect(fake.data.has('rooms/room-1/messages/msg-1')).toBe(false);
-    expect(fake.data.get(`accountDeletions/${uid}`)).toMatchObject({ status: 'completed', phase: 'done', usernameKeys: [] });
+    expect(fake.data.has('rooms/room-owned')).toBe(false);
+    expect(fake.data.has('rooms/room-owned/members/user-a')).toBe(false);
+    expect(fake.data.has('rooms/room-owned/messages/m-own')).toBe(false);
+    expect(fake.data.has('rooms/room-foreign/members/user-a')).toBe(false);
+
+    // Foreign room, other users' data, and anonymized message remain intact.
+    expect(fake.data.has('users/user-b')).toBe(true);
+    expect(fake.data.has('usernames/bob-user1')).toBe(true);
+    expect(fake.data.has('rooms/room-foreign/members/user-b')).toBe(true);
+    expect(fake.data.get('rooms/room-foreign/messages/m-1')).toMatchObject({ senderId: null, authorDeleted: true, text: 'mensaje en sala ajena' });
+    expect(fake.data.get('rooms/room-foreign/messages/m-2')).toMatchObject({ senderId: 'user-b', text: 'mensaje de otro' });
+
+    // Status can be queried safely via X-Deletion-Status-Token even after Auth deletion.
+    const statusRes = await request(app)
+      .get('/api/users/me/deletion-status')
+      .set('X-Deletion-Status-Token', response.body.data.statusToken);
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.body).toEqual({ success: true, data: { status: 'completed' } });
   });
 
-  it('succeeds even if Auth user is already absent (auth/user-not-found)', async () => {
-    config.deleteUser.mockRejectedValueOnce({ code: 'auth/user-not-found' });
-    const result = await deleteAccountImmediately(uid, fake.db, { deleteUser: config.deleteUser } as unknown as Auth);
-    expect(result).toEqual({ status: 'deleted' });
-    expect(fake.data.has(`users/${uid}`)).toBe(false);
-    expect(fake.data.has('usernames/ana-user1')).toBe(false);
+  it('rejects unknown statusToken with 404 without leaking account existence', async () => {
+    const res = await request(app).get('/api/users/me/deletion-status').set('X-Deletion-Status-Token', 'invalid-token');
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('DELETION_STATUS_NOT_FOUND');
   });
 
-  it('rejects already completed or blocked deletion markers', async () => {
-    fake.data.set(`accountDeletions/${uid}`, { ...marker, status: 'completed', phase: 'done', completedAt: now });
-    await expect(deleteAccountImmediately(uid, fake.db)).rejects.toMatchObject({ statusCode: 409, code: 'ACCOUNT_DELETED' });
-    fake.data.set(`accountDeletions/${uid}`, { ...marker, status: 'blocked' });
-    await expect(deleteAccountImmediately(uid, fake.db)).rejects.toMatchObject({ statusCode: 409, code: 'ACCOUNT_DELETION_BLOCKED' });
+  it('requires recent auth_time (<= 300s) for new requests, but allows idempotent retries of pending requests', async () => {
+    config.verify.mockResolvedValueOnce({ uid, auth_time: seconds - 301, iat: seconds });
+    const stale = await remove();
+    expect(stale.status).toBe(401);
+    expect(stale.body.code).toBe('AUTH_RECENT_REQUIRED');
+
+    // Simulate transient Auth failure on first attempt -> stays pending.
+    config.deleteUser.mockRejectedValueOnce({ code: 'auth/network-request-failed' });
+    const first = await remove();
+    expect(first.status).toBe(202);
+    expect(first.body.data.status).toBe('pending');
+    expect(fake.data.get(`accountDeletions/${uid}`)).toMatchObject({ status: 'pending', phase: 'auth' });
+
+    // Retry with older auth_time succeeds and resumes from phase 'auth'.
+    config.verify.mockResolvedValueOnce({ uid, auth_time: seconds - 600, iat: seconds });
+    // Advance mock clock past backoff.
+    vi.spyOn(Date, 'now').mockReturnValue((seconds + 120) * 1000);
+    const retry = await remove();
+    expect(retry.status).toBe(200);
+    expect(retry.body.data.status).toBe('completed');
   });
 
-  it('requires authentication and rejects JSON bodies on HTTP DELETE', async () => {
-    expect((await request(app).delete('/api/users/me')).status).toBe(401);
-    const withBody = await remove().send({ uid: 'other' });
-    expect(withBody.status).toBe(400);
-    expect(withBody.body.code).toBe('VALIDATION_ERROR');
+  it('respects active lease held by another instance and avoids duplicate processing', async () => {
+    fake.data.set(`accountDeletions/${uid}`, {
+      status: 'pending',
+      phase: 'auth',
+      usernameKeys: [],
+      requestedAt: now,
+      updatedAt: now,
+      attempts: 1,
+      leaseOwner: 'other-instance',
+      leaseExpiresAt: Timestamp.fromMillis((seconds + 30) * 1000),
+    });
+    const status = await runAccountDeletionWithLease(uid, fake.db, { deleteUser: config.deleteUser } as unknown as Auth, () => now);
+    expect(status).toBe('pending');
+    expect(config.deleteUser).not.toHaveBeenCalled();
+  });
+
+  it('returns completed idempotently on repeated request after completion', async () => {
+    const first = await requestAccountDeletion({ uid, authTime: seconds }, fake.db, { deleteUser: config.deleteUser } as unknown as Auth);
+    expect(first.status).toBe('completed');
+    config.deleteUser.mockClear();
+    const second = await requestAccountDeletion({ uid, authTime: seconds - 1000 }, fake.db, { deleteUser: config.deleteUser } as unknown as Auth);
+    expect(second.status).toBe('completed');
+    expect(config.deleteUser).not.toHaveBeenCalled();
+    expect(await getAccountDeletionStatus({ statusToken: second.statusToken }, fake.db)).toEqual({ status: 'completed' });
   });
 });
 

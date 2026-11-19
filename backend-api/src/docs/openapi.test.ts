@@ -81,7 +81,8 @@ describe('OpenAPI user contracts', () => {
   it('documents DELETE account deletion without request body', () => {
     const route = openapi.paths['/api/users/me'].delete;
     expect(route).not.toHaveProperty('requestBody');
-    expect(route.responses[200].content['application/json'].example).toEqual({ success: true, data: { status: 'deleted' } });
+    expect(route.responses[200].content['application/json'].example).toEqual({ success: true, data: { status: 'completed', statusToken: 'opaque-status-token' } });
+    expect(openapi.paths['/api/users/me/deletion-status'].get).toBeDefined();
   });
 
 });

@@ -2,10 +2,10 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppError } from '../middleware/errors';
 vi.mock('../services/account-state.service', () => ({ ensureAccountActive: async () => undefined }));
-const mocks = vi.hoisted(() => ({ verifyIdToken: vi.fn(), getFirebaseAuth: vi.fn(), getUserProfile: vi.fn(), getUserProfileAndSyncEmail: vi.fn(), createUserProfile: vi.fn(), updateUserProfile: vi.fn(), validateEmailChangeEligibility: vi.fn(), deleteAccountImmediately: vi.fn() }));
+const mocks = vi.hoisted(() => ({ verifyIdToken: vi.fn(), getFirebaseAuth: vi.fn(), getUserProfile: vi.fn(), getUserProfileAndSyncEmail: vi.fn(), createUserProfile: vi.fn(), updateUserProfile: vi.fn(), validateEmailChangeEligibility: vi.fn(), requestAccountDeletion: vi.fn(), getAccountDeletionStatus: vi.fn() }));
 vi.mock('../config/firebase', () => ({ getFirebaseAuth: mocks.getFirebaseAuth }));
 vi.mock('../services/users.service', () => ({ getUserProfile: mocks.getUserProfile, getUserProfileAndSyncEmail: mocks.getUserProfileAndSyncEmail, createUserProfile: mocks.createUserProfile, updateUserProfile: mocks.updateUserProfile, validateEmailChangeEligibility: mocks.validateEmailChangeEligibility }));
-vi.mock('../services/account-deletion.service', () => ({ deleteAccountImmediately: mocks.deleteAccountImmediately }));
+vi.mock('../services/account-deletion.service', () => ({ requestAccountDeletion: mocks.requestAccountDeletion, getAccountDeletionStatus: mocks.getAccountDeletionStatus }));
 import { app } from '../app';
 const body = { nombre: 'Ana', apellido: 'Pérez', username: ' ANA_User1 ' };
 const data = { uid: 'uid-1', profileStatus: 'complete', profile: { uid: 'uid-1', email: 'ana@example.com', nombre: 'Ana', apellido: 'Pérez', username: 'ANA_User1', usernameKey: 'ana_user1', avatarUrl: null, profileStatus: 'complete', createdAt: '2026-11-09T00:00:00.000Z', updatedAt: '2026-11-09T00:00:00.000Z' } };
@@ -104,7 +104,7 @@ describe('DELETE /api/users/me', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.getFirebaseAuth.mockReturnValue({ verifyIdToken: mocks.verifyIdToken });
-    mocks.verifyIdToken.mockResolvedValue({ uid: 'uid-1', email: 'ana@example.com' });
+    mocks.verifyIdToken.mockResolvedValue({ uid: 'uid-1', email: 'ana@example.com', auth_time: 1800000000 });
   });
   const remove = () => request(app).delete('/api/users/me').set('Authorization', 'Bearer test-token');
 
@@ -112,27 +112,42 @@ describe('DELETE /api/users/me', () => {
     const response = await request(app).delete('/api/users/me');
     expect(response.status).toBe(401);
     expect(response.body.code).toBe('AUTH_REQUIRED');
-    expect(mocks.deleteAccountImmediately).not.toHaveBeenCalled();
+    expect(mocks.requestAccountDeletion).not.toHaveBeenCalled();
   });
 
   it('rejects any request body with 400 VALIDATION_ERROR', async () => {
     const response = await remove().send({ confirm: true });
     expect(response.status).toBe(400);
     expect(response.body.code).toBe('VALIDATION_ERROR');
-    expect(mocks.deleteAccountImmediately).not.toHaveBeenCalled();
+    expect(mocks.requestAccountDeletion).not.toHaveBeenCalled();
   });
 
-  it('deletes account and returns 200 with status deleted', async () => {
-    mocks.deleteAccountImmediately.mockResolvedValueOnce({ status: 'deleted' });
+  it('deletes account and returns 200 with status completed and statusToken', async () => {
+    mocks.requestAccountDeletion.mockResolvedValueOnce({ status: 'completed', statusToken: 'tok-1' });
     const response = await remove();
     expect(response.status).toBe(200);
     expect(response.headers['cache-control']).toBe('no-store');
-    expect(response.body).toEqual({ success: true, data: { status: 'deleted' } });
-    expect(mocks.deleteAccountImmediately).toHaveBeenCalledExactlyOnceWith('uid-1');
+    expect(response.body).toEqual({ success: true, data: { status: 'completed', statusToken: 'tok-1' } });
+    expect(mocks.requestAccountDeletion).toHaveBeenCalledWith(expect.objectContaining({ uid: 'uid-1', authTime: 1800000000 }));
   });
 
-  it.each([[409, 'ACCOUNT_DELETED'], [409, 'ACCOUNT_DELETION_BLOCKED'], [503, 'AUTH_UNAVAILABLE'], [503, 'FIRESTORE_UNAVAILABLE']] as const)('preserves controlled error %s %s', async (status, code) => {
-    mocks.deleteAccountImmediately.mockRejectedValueOnce(new AppError(status, code, 'Error controlado.'));
+  it('returns 202 when deletion remains pending for recovery', async () => {
+    mocks.requestAccountDeletion.mockResolvedValueOnce({ status: 'pending', statusToken: 'tok-1' });
+    const response = await remove();
+    expect(response.status).toBe(202);
+    expect(response.body).toEqual({ success: true, data: { status: 'pending', statusToken: 'tok-1' } });
+  });
+
+  it('queries deletion status via X-Deletion-Status-Token without Firebase Auth', async () => {
+    mocks.getAccountDeletionStatus.mockResolvedValueOnce({ status: 'completed' });
+    const response = await request(app).get('/api/users/me/deletion-status').set('X-Deletion-Status-Token', 'tok-1');
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ success: true, data: { status: 'completed' } });
+    expect(mocks.getAccountDeletionStatus).toHaveBeenCalledExactlyOnceWith({ statusToken: 'tok-1' });
+  });
+
+  it.each([[409, 'ACCOUNT_DELETION_BLOCKED'], [401, 'AUTH_RECENT_REQUIRED'], [503, 'AUTH_UNAVAILABLE'], [503, 'FIRESTORE_UNAVAILABLE']] as const)('preserves controlled error %s %s', async (status, code) => {
+    mocks.requestAccountDeletion.mockRejectedValueOnce(new AppError(status, code, 'Error controlado.'));
     const response = await remove();
     expect(response.status).toBe(status);
     expect(response.body).toEqual({ success: false, code, message: 'Error controlado.' });
