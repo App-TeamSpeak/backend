@@ -73,3 +73,70 @@ export async function persistRoomMessage(
   };
 }
 
+export function watchRoomAccess(
+  roomId: string,
+  uid: string,
+  onRevoked: (code: 'ROOM_NOT_FOUND' | 'ROOM_ACCESS_DENIED') => void,
+  onError: () => void,
+): () => void {
+  if (!roomId || roomId.length > 128 || roomId.includes('/') || !uid || uid.length > 128 || uid.includes('/')) {
+    onRevoked('ROOM_ACCESS_DENIED');
+    return () => undefined;
+  }
+  const db = getFirestoreDb();
+  let active = true;
+  let roomExists: boolean | undefined;
+  let ownerId: unknown;
+  let memberExists: boolean | undefined;
+  let stopRoom: (() => void) | undefined;
+  let stopMember: (() => void) | undefined;
+
+  const stop = () => {
+    if (!active) return;
+    active = false;
+    try { stopRoom?.(); } catch { /* ignore cleanup error */ }
+    try { stopMember?.(); } catch { /* ignore cleanup error */ }
+  };
+
+  const evaluate = () => {
+    if (!active) return;
+    if (roomExists === false) {
+      stop();
+      onRevoked('ROOM_NOT_FOUND');
+      return;
+    }
+    if (roomExists === true && ownerId !== uid && memberExists === false) {
+      stop();
+      onRevoked('ROOM_ACCESS_DENIED');
+    }
+  };
+
+  try {
+    stopRoom = db.collection('rooms').doc(roomId).onSnapshot((snapshot) => {
+      if (!active) return;
+      roomExists = snapshot.exists;
+      ownerId = snapshot.exists ? (snapshot.data() as { ownerId?: unknown } | undefined)?.ownerId : undefined;
+      evaluate();
+    }, () => {
+      if (!active) return;
+      stop();
+      onError();
+    });
+
+    stopMember = db.collection('rooms').doc(roomId).collection('members').doc(uid).onSnapshot((snapshot) => {
+      if (!active) return;
+      memberExists = snapshot.exists;
+      evaluate();
+    }, () => {
+      if (!active) return;
+      stop();
+      onError();
+    });
+  } catch {
+    stop();
+    onError();
+  }
+
+  return stop;
+}
+

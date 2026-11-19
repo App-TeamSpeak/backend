@@ -1,10 +1,10 @@
 import { Timestamp } from 'firebase-admin/firestore';
-import { beforeEach, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ getFirestoreDb: vi.fn() }));
 vi.mock('../config/firebase', () => ({ getFirestoreDb: mocks.getFirestoreDb }));
 
-import { ensureRoomAccessible, persistRoomMessage, RoomChatError } from './room-chat.service';
+import { ensureRoomAccessible, persistRoomMessage, RoomChatError, watchRoomAccess } from './room-chat.service';
 
 function makeDb(options: {
   room?: { exists: boolean; data?: () => Record<string, unknown> };
@@ -97,5 +97,61 @@ it('persists message in rooms/{roomId}/messages with Firestore schema', async ()
 it('maps message persistence errors to EVENT_FAILED', async () => {
   makeDb({ create: vi.fn().mockRejectedValue(new Error('firestore down')) });
   await expect(persistRoomMessage('room-1', 'user-1', 'Hola')).rejects.toMatchObject({ code: 'EVENT_FAILED' });
+});
+
+describe('watchRoomAccess', () => {
+  function setupSnapshots() {
+    let roomCb!: (snap: { exists: boolean; data?: () => Record<string, unknown> }) => void;
+    let memberCb!: (snap: { exists: boolean }) => void;
+    const stopRoom = vi.fn();
+    const stopMember = vi.fn();
+    const db = {
+      collection: () => ({
+        doc: () => ({
+          onSnapshot: (cb: typeof roomCb) => { roomCb = cb; return stopRoom; },
+          collection: () => ({
+            doc: () => ({
+              onSnapshot: (cb: typeof memberCb) => { memberCb = cb; return stopMember; },
+            }),
+          }),
+        }),
+      }),
+    };
+    mocks.getFirestoreDb.mockReturnValue(db);
+    return { emitRoom: (v: { exists: boolean; data?: () => Record<string, unknown> }) => roomCb(v), emitMember: (v: { exists: boolean }) => memberCb(v), stopRoom, stopMember };
+  }
+
+  it('triggers ROOM_NOT_FOUND when room is deleted and unsubscribes both listeners', () => {
+    const s = setupSnapshots();
+    const onRevoked = vi.fn();
+    watchRoomAccess('room-1', 'user-1', onRevoked, vi.fn());
+    s.emitRoom({ exists: false });
+    expect(onRevoked).toHaveBeenCalledExactlyOnceWith('ROOM_NOT_FOUND');
+    expect(s.stopRoom).toHaveBeenCalled();
+    expect(s.stopMember).toHaveBeenCalled();
+  });
+
+  it('triggers ROOM_ACCESS_DENIED when non-owner membership is revoked', () => {
+    const s = setupSnapshots();
+    const onRevoked = vi.fn();
+    watchRoomAccess('room-1', 'user-2', onRevoked, vi.fn());
+    s.emitRoom({ exists: true, data: () => ({ ownerId: 'owner-1' }) });
+    s.emitMember({ exists: false });
+    expect(onRevoked).toHaveBeenCalledExactlyOnceWith('ROOM_ACCESS_DENIED');
+    expect(s.stopRoom).toHaveBeenCalled();
+    expect(s.stopMember).toHaveBeenCalled();
+  });
+
+  it('preserves owner access even when member document is absent', () => {
+    const s = setupSnapshots();
+    const onRevoked = vi.fn();
+    const stop = watchRoomAccess('room-1', 'owner-1', onRevoked, vi.fn());
+    s.emitRoom({ exists: true, data: () => ({ ownerId: 'owner-1' }) });
+    s.emitMember({ exists: false });
+    expect(onRevoked).not.toHaveBeenCalled();
+    stop();
+    expect(s.stopRoom).toHaveBeenCalled();
+    expect(s.stopMember).toHaveBeenCalled();
+  });
 });
 

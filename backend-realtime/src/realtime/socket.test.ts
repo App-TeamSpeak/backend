@@ -1,12 +1,13 @@
 import { ProfileAuthorizationError } from '../services/profile-state.service';
 import { createServer, type Server } from 'node:http';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ verifyToken: vi.fn(), requireActiveAccount: vi.fn(), startAccountAuthorization: vi.fn(), watchAccountDeletion: vi.fn(), requireCompleteProfile: vi.fn(), ensureRoomAccessible: vi.fn(), persistRoomMessage: vi.fn() }));
+const mocks = vi.hoisted(() => ({ verifyToken: vi.fn(), requireActiveAccount: vi.fn(), startAccountAuthorization: vi.fn(), watchAccountDeletion: vi.fn(), requireCompleteProfile: vi.fn(), ensureRoomAccessible: vi.fn(), persistRoomMessage: vi.fn(), watchRoomAccess: vi.fn() }));
 vi.mock('../services/profile-state.service', async original => ({ ...await original<typeof import('../services/profile-state.service')>(), requireCompleteProfile: mocks.requireCompleteProfile }));
 vi.mock('../services/room-chat.service', async original => ({
   ...await original<typeof import('../services/room-chat.service')>(),
   ensureRoomAccessible: mocks.ensureRoomAccessible,
   persistRoomMessage: mocks.persistRoomMessage,
+  watchRoomAccess: mocks.watchRoomAccess,
 }));
 vi.mock('../services/firebase-auth.service', () => ({ verifyToken: mocks.verifyToken }));
 vi.mock('../services/account-state.service', async (original) => ({ ...await original<typeof import('../services/account-state.service')>(), requireActiveAccount: mocks.requireActiveAccount, startAccountAuthorization: mocks.startAccountAuthorization }));
@@ -25,6 +26,7 @@ beforeEach(async () => {
   mocks.requireActiveAccount.mockResolvedValue(undefined);
   mocks.requireCompleteProfile.mockResolvedValue(undefined);
   mocks.ensureRoomAccessible.mockResolvedValue(undefined);
+  mocks.watchRoomAccess.mockImplementation(() => vi.fn());
   mocks.persistRoomMessage.mockImplementation(async (_roomId, uid, text) => ({ messageId: 'msg-1', authorId: uid, text, createdAt: new Date().toISOString() }));
   mocks.watchAccountDeletion.mockImplementation((_uid, changed) => { queueMicrotask(() => changed(false)); return vi.fn(); });
   mocks.startAccountAuthorization.mockImplementation((uid) => {
@@ -323,4 +325,63 @@ it('persists chat:send messages in Firestore before broadcasting and fails close
   mocks.persistRoomMessage.mockRejectedValueOnce(new RoomChatError('EVENT_FAILED'));
   expect(await value.request('chat:send', { text: 'No persistido' })).toMatchObject({ ok: false, error: { code: 'EVENT_FAILED' } });
   expect(value.received.slice(before).some(([name]) => name === 'chat:message')).toBe(false);
+});
+
+it('revalidates on re-joining the same roomId and kicks user if access was revoked', async () => {
+  const value = await connected('member');
+  expect(await value.request('room:join', { roomId: 'room-1' })).toEqual({ ok: true });
+  mocks.ensureRoomAccessible.mockRejectedValueOnce(new RoomChatError('ROOM_ACCESS_DENIED'));
+  expect(await value.request('room:join', { roomId: 'room-1' })).toMatchObject({ ok: false, error: { code: 'ROOM_ACCESS_DENIED' } });
+  expect(value.received.some(([name, payload]) => name === 'room:access-revoked' && (payload as { code: string }).code === 'ROOM_ACCESS_DENIED')).toBe(true);
+  expect(io.sockets.adapter.rooms.has('room-1')).toBe(false);
+});
+
+it('revokes live access, stops broadcasts, cleans listeners, and avoids duplicate participant-left on disconnect', async () => {
+  let triggerRevoke!: (code: 'ROOM_NOT_FOUND' | 'ROOM_ACCESS_DENIED') => void;
+  const stopWatcher = vi.fn();
+  mocks.watchRoomAccess.mockImplementation((_roomId, uid, onRevoked) => {
+    if (uid === 'target') triggerRevoke = onRevoked;
+    return stopWatcher;
+  });
+
+  const observer = await connected('observer');
+  const target = await connected('target');
+  await observer.request('room:join', { roomId: 'room-1' });
+  await target.request('room:join', { roomId: 'room-1' });
+
+  const observerLeftBefore = observer.received.filter(([e]) => e === 'room:participant-left').length;
+  triggerRevoke('ROOM_NOT_FOUND');
+
+  await vi.waitFor(() => {
+    expect(target.received.some(([e, p]) => e === 'room:access-revoked' && (p as { roomId: string; code: string }).code === 'ROOM_NOT_FOUND')).toBe(true);
+  });
+  expect(stopWatcher).toHaveBeenCalled();
+
+  // Target no longer receives subsequent room broadcasts.
+  const targetCountAfterRevoke = target.received.length;
+  await observer.request('chat:send', { text: 'solo para miembros' });
+  expect(target.received.slice(targetCountAfterRevoke).some(([e]) => e === 'chat:message')).toBe(false);
+
+  // Subsequent disconnect or room:leave does not emit a duplicate room:participant-left.
+  await target.close();
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  const observerLeftAfter = observer.received.filter(([e]) => e === 'room:participant-left').length;
+  expect(observerLeftAfter - observerLeftBefore).toBe(1);
+});
+
+it('blocks chat:send when access is revoked before or during send', async () => {
+  const value = await connected('member');
+  await value.request('room:join', { roomId: 'room-1' });
+  mocks.ensureRoomAccessible.mockRejectedValueOnce(new RoomChatError('ROOM_ACCESS_DENIED'));
+  expect(await value.request('chat:send', { text: 'bloqueado' })).toMatchObject({ ok: false, error: { code: 'ROOM_ACCESS_DENIED' } });
+  expect(mocks.persistRoomMessage).not.toHaveBeenCalled();
+});
+
+it('detaches room watcher on room:leave and disconnect', async () => {
+  const stopWatcher = vi.fn();
+  mocks.watchRoomAccess.mockReturnValue(stopWatcher);
+  const value = await connected('member');
+  await value.request('room:join', { roomId: 'room-1' });
+  await value.request('room:leave', {});
+  expect(stopWatcher).toHaveBeenCalledTimes(1);
 });
