@@ -20,12 +20,15 @@ export const userBodySchema = z.strictObject({
   avatarUrl: editableFields.avatarUrl.optional().transform((value) => value ?? null),
 });
 
-export const userPatchSchema = z.strictObject({
-  ...editableFields,
-  email: z.string().trim().toLowerCase().pipe(z.email()),
-}).partial()
+export const userPatchSchema = z.strictObject(editableFields).partial()
   .refine((value) => Object.values(value).some((field) => field !== undefined),
     'Envía al menos un campo editable.');
+
+export const emailChangeSchema = z.strictObject({
+  newEmail: z.string().trim().toLowerCase().pipe(z.email()),
+});
+
+export type EmailChangeBody = z.infer<typeof emailChangeSchema>;
 
 export type UserPatch = z.infer<typeof userPatchSchema>;
 

@@ -1,13 +1,18 @@
 import type { RequestHandler } from 'express';
 import { AppError } from '../middleware/errors';
-import { userBodySchema, userPatchSchema } from '../validators/user.validator';
-import { createUserProfile, getUserProfile, updateUserProfile } from '../services/users.service';
+import { emailChangeSchema, userBodySchema, userPatchSchema } from '../validators/user.validator';
+import { createUserProfile, getUserProfile, syncUserEmailFromAuth, updateUserProfile, validateEmailChangeEligibility } from '../services/users.service';
 import { deleteAccountImmediately } from '../services/account-deletion.service';
 
 export const getMe: RequestHandler = async (request, response) => {
   if (!request.user) throw new AppError(401, 'AUTH_REQUIRED', 'Se requiere autenticación.');
   response.setHeader('Cache-Control', 'no-store');
-  const data = await getUserProfile(request.user);
+  const current = await getUserProfile(request.user);
+  const data = current.profileStatus === 'complete' && current.profile && request.user.email
+    && typeof current.profile.email === 'string'
+    && request.user.email.trim().toLowerCase() !== current.profile.email.toLowerCase()
+    ? await syncUserEmailFromAuth(request.user, current)
+    : current;
   if (!response.destroyed) response.json({ success: true, data });
 };
 
@@ -22,6 +27,13 @@ export const updateMe: RequestHandler = async (request, response) => {
   if (!request.user) throw new AppError(401, 'AUTH_REQUIRED', 'Se requiere autenticación.');
   response.setHeader('Cache-Control', 'no-store');
   const data = await updateUserProfile(request.user, userPatchSchema.parse(request.body));
+  if (!response.destroyed) response.json({ success: true, data });
+};
+
+export const requestEmailChange: RequestHandler = async (request, response) => {
+  if (!request.user) throw new AppError(401, 'AUTH_REQUIRED', 'Se requiere autenticación.');
+  response.setHeader('Cache-Control', 'no-store');
+  const data = await validateEmailChangeEligibility(request.user, emailChangeSchema.parse(request.body));
   if (!response.destroyed) response.json({ success: true, data });
 };
 export const deleteMe: RequestHandler = async (request, response) => {
