@@ -1,8 +1,10 @@
 import { readAuthorizationDocument } from './authorization-read.service';
+import type { Auth } from 'firebase-admin/auth';
 import { Timestamp, type Firestore } from 'firebase-admin/firestore';
 import { z } from 'zod';
+import { getFirebaseAuth } from '../config/firebase';
 import { AppError } from '../middleware/errors';
-import { userBodySchema, userPatchSchema, type UserPatch, type UserBody } from '../validators/user.validator';
+import { emailChangeSchema, userBodySchema, userPatchSchema, type EmailChangeBody, type UserPatch, type UserBody } from '../validators/user.validator';
 import { assertNoAccountDeletion, ensureAccountActive } from './account-state.service';
 import { getFirestoreCollections, withFirestore } from './firestore.service';
 import type { UserDocument } from './firestore.documents';
@@ -133,20 +135,11 @@ export async function updateUserProfile(identity: UserIdentity, input: UserPatch
           throw new AppError(409, 'USERNAME_TAKEN', 'El username no está disponible.');
         }
       }
-      const nextEmail = patch.email?.toLowerCase();
-      const emailChanged = nextEmail !== undefined && nextEmail !== profile.email.toLowerCase();
-      if (emailChanged) {
-        const emailMatches = await transaction.get(users.where('email', '==', nextEmail).limit(2));
-        if (emailMatches.docs.some((doc) => doc.id !== identity.uid)) {
-          throw new AppError(409, 'EMAIL_TAKEN', 'El correo electrónico no está disponible.');
-        }
-      }
       const changes: UserPatch = {};
       for (const field of ['nombre', 'apellido', 'username', 'avatarUrl'] as const) {
         const value = patch[field];
         if (value !== undefined && value !== profile[field]) Object.assign(changes, { [field]: value });
       }
-      if (emailChanged && nextEmail) changes.email = nextEmail;
       if (!Object.keys(changes).length) {
         return { uid: identity.uid, profileStatus: 'complete' as const, profile: serialize(profile) };
       }
@@ -158,4 +151,124 @@ export async function updateUserProfile(identity: UserIdentity, input: UserPatch
       return { uid: identity.uid, profileStatus: 'complete' as const, profile: serialize({ ...profile, ...changes, usernameKey, updatedAt }) };
     });
   }, db);
+}
+
+function isAuthTransientError(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+  return new Set<unknown>(['app/network-error', 'app/network-timeout', 'auth/network-request-failed', 'auth/too-many-requests', 'auth/quota-exceeded']).has(code);
+}
+
+export async function syncUserEmailFromAuth(
+  identity: UserIdentity,
+  state: Awaited<ReturnType<typeof getUserProfile>>,
+  db?: Firestore,
+  auth?: Auth,
+) {
+  if (state.profileStatus !== 'complete' || !state.profile) return state;
+  const tokenEmail = identity.email?.trim().toLowerCase();
+  if (!tokenEmail || tokenEmail === state.profile.email.toLowerCase()) return state;
+
+  let firebaseAuth: Auth;
+  try { firebaseAuth = auth ?? getFirebaseAuth(); }
+  catch { return state; }
+
+  let authUser;
+  try { authUser = await firebaseAuth.getUser(identity.uid); }
+  catch (error) {
+    if (isAuthTransientError(error)) throw new AppError(503, 'AUTH_UNAVAILABLE', 'La autenticación no está disponible.');
+    return state;
+  }
+
+  const authEmail = authUser.email?.trim().toLowerCase();
+  if (!authEmail || authUser.emailVerified !== true || authEmail === state.profile.email.toLowerCase()) {
+    return state;
+  }
+
+  return withFirestore(async (firestore) => {
+    const { users, accountDeletions } = getFirestoreCollections(firestore);
+    const profileRef = users.doc(identity.uid);
+    return firestore.runTransaction(async (transaction) => {
+      assertNoAccountDeletion(await transaction.get(accountDeletions.doc(identity.uid)));
+      const snapshot = await transaction.get(profileRef);
+      if (!snapshot.exists) throw new AppError(404, 'PROFILE_NOT_FOUND', 'Completa el registro mediante POST /api/users/me.');
+      const current = inspectProfile(snapshot.data(), identity.uid).complete;
+      if (!current) throw new AppError(409, 'PROFILE_INCOMPLETE', 'Completa el perfil mediante POST /api/users/me.');
+      if (current.email.toLowerCase() === authEmail) {
+        return { uid: identity.uid, profileStatus: 'complete' as const, profile: serialize(current) };
+      }
+      const updatedAt = Timestamp.now();
+      transaction.update(profileRef, { email: authEmail, updatedAt });
+      return { uid: identity.uid, profileStatus: 'complete' as const, profile: serialize({ ...current, email: authEmail, updatedAt }) };
+    });
+  }, db);
+}
+
+export async function getUserProfileAndSyncEmail(identity: UserIdentity, db?: Firestore, auth?: Auth) {
+  const state = await getUserProfile(identity, db);
+  return syncUserEmailFromAuth(identity, state, db, auth);
+}
+
+export async function validateEmailChangeEligibility(
+  identity: UserIdentity & { authTime?: number },
+  input: EmailChangeBody,
+  db?: Firestore,
+  auth?: Auth,
+) {
+  const { newEmail } = emailChangeSchema.parse(input);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (typeof identity.authTime !== 'number' || !Number.isSafeInteger(identity.authTime) || identity.authTime <= 0 || identity.authTime > nowSeconds || nowSeconds - identity.authTime > 300) {
+    throw new AppError(401, 'AUTH_RECENT_REQUIRED', 'Vuelve a autenticarte antes de cambiar tu correo electrónico.');
+  }
+
+  let firebaseAuth: Auth;
+  try { firebaseAuth = auth ?? getFirebaseAuth(); }
+  catch { throw new AppError(503, 'AUTH_UNAVAILABLE', 'La autenticación no está disponible.'); }
+
+  let authUser;
+  try { authUser = await firebaseAuth.getUser(identity.uid); }
+  catch (error) {
+    const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+    if (code === 'auth/user-not-found') throw new AppError(401, 'AUTH_USER_DELETED', 'La cuenta ya no existe en Authentication.');
+    if (isAuthTransientError(error)) throw new AppError(503, 'AUTH_UNAVAILABLE', 'La autenticación no está disponible.');
+    throw new AppError(500, 'INTERNAL_ERROR', 'No se pudo verificar la identidad en Authentication.');
+  }
+
+  const providers = authUser.providerData.map((provider) => provider.providerId);
+  if (!providers.includes('password')) {
+    throw new AppError(403, 'EMAIL_CHANGE_NOT_ALLOWED', 'Las cuentas vinculadas únicamente con Google no pueden cambiar su correo electrónico desde TeamSpeak.');
+  }
+
+  const currentEmail = authUser.email?.trim().toLowerCase();
+  if (currentEmail === newEmail) {
+    throw new AppError(400, 'EMAIL_UNCHANGED', 'El nuevo correo debe ser diferente al correo actual.');
+  }
+
+  try {
+    const existing = await firebaseAuth.getUserByEmail(newEmail);
+    if (existing.uid !== identity.uid) {
+      throw new AppError(409, 'EMAIL_TAKEN', 'El correo electrónico no está disponible.');
+    }
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+    if (code !== 'auth/user-not-found') {
+      if (isAuthTransientError(error)) throw new AppError(503, 'AUTH_UNAVAILABLE', 'La autenticación no está disponible.');
+      throw new AppError(500, 'INTERNAL_ERROR', 'No se pudo comprobar la disponibilidad del correo.');
+    }
+  }
+
+  await withFirestore(async (firestore) => {
+    await ensureAccountActive(identity.uid, firestore);
+    const matches = await getFirestoreCollections(firestore).users.where('email', '==', newEmail).limit(2).get();
+    if (matches.docs.some((doc) => doc.id !== identity.uid)) {
+      throw new AppError(409, 'EMAIL_TAKEN', 'El correo electrónico no está disponible.');
+    }
+  }, db);
+
+  return {
+    eligible: true as const,
+    currentEmail: currentEmail ?? '',
+    targetEmail: newEmail,
+    nextStep: 'verify_before_update_email' as const,
+  };
 }

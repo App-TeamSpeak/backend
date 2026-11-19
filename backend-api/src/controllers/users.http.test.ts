@@ -2,9 +2,9 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppError } from '../middleware/errors';
 vi.mock('../services/account-state.service', () => ({ ensureAccountActive: async () => undefined }));
-const mocks = vi.hoisted(() => ({ verifyIdToken: vi.fn(), getFirebaseAuth: vi.fn(), getUserProfile: vi.fn(), createUserProfile: vi.fn(), updateUserProfile: vi.fn(), deleteAccountImmediately: vi.fn() }));
+const mocks = vi.hoisted(() => ({ verifyIdToken: vi.fn(), getFirebaseAuth: vi.fn(), getUserProfile: vi.fn(), getUserProfileAndSyncEmail: vi.fn(), createUserProfile: vi.fn(), updateUserProfile: vi.fn(), validateEmailChangeEligibility: vi.fn(), deleteAccountImmediately: vi.fn() }));
 vi.mock('../config/firebase', () => ({ getFirebaseAuth: mocks.getFirebaseAuth }));
-vi.mock('../services/users.service', () => ({ getUserProfile: mocks.getUserProfile, createUserProfile: mocks.createUserProfile, updateUserProfile: mocks.updateUserProfile }));
+vi.mock('../services/users.service', () => ({ getUserProfile: mocks.getUserProfile, getUserProfileAndSyncEmail: mocks.getUserProfileAndSyncEmail, createUserProfile: mocks.createUserProfile, updateUserProfile: mocks.updateUserProfile, validateEmailChangeEligibility: mocks.validateEmailChangeEligibility }));
 vi.mock('../services/account-deletion.service', () => ({ deleteAccountImmediately: mocks.deleteAccountImmediately }));
 import { app } from '../app';
 const body = { nombre: 'Ana', apellido: 'Pérez', username: ' ANA_User1 ' };
@@ -74,16 +74,16 @@ describe('PATCH /api/users/me', () => {
     mocks.verifyIdToken.mockResolvedValue({ uid: 'uid-1', email: 'ana@example.com', email_verified: true });
   });
   const patch = () => request(app).patch('/api/users/me').set('Authorization', 'Bearer test-token');
-  it.each([{ nombre: ' Ana María ' }, { apellido: 'García' }, { email: ' Ana.Nueva@Example.com ' }, { avatarUrl: null }, { username: 'Ana-User2' }])('updates allowed partial input %j', async (input) => {
+  it.each([{ nombre: ' Ana María ' }, { apellido: 'García' }, { avatarUrl: null }, { username: 'Ana-User2' }])('updates allowed partial input %j', async (input) => {
     mocks.updateUserProfile.mockResolvedValue(data);
     const response = await patch().send(input);
     expect(response.status).toBe(200); expect(response.body).toEqual({ success: true, data });
     expect(response.headers['cache-control']).toBe('no-store');
-    const expected = 'nombre' in input ? { nombre: 'Ana María' } : 'email' in input ? { email: 'ana.nueva@example.com' } : input;
+    const expected = 'nombre' in input ? { nombre: 'Ana María' } : input;
     expect(mocks.updateUserProfile).toHaveBeenCalledWith({ uid: 'uid-1', email: 'ana@example.com', emailVerified: true }, expected);
     if (!('avatarUrl' in input)) expect(mocks.updateUserProfile.mock.calls[0][1]).not.toHaveProperty('avatarUrl');
   });
-  it.each([{}, { uid: 'other' }, { email: 'not-an-email' }, { createdAt: 'x' }, { updatedAt: 'x' }, { profileStatus: 'complete' }, { usernameKey: 'ana-user2' }, { other: 1 }, { nombre: ' ' }, { apellido: 4 }, { username: 'short' }, { avatarUrl: '' }, { avatarUrl: 'not-a-url' }, { avatarUrl: 'http://example.com' }])('rejects invalid input %j', async (input) => {
+  it.each([{}, { uid: 'other' }, { email: 'other@example.com' }, { createdAt: 'x' }, { updatedAt: 'x' }, { profileStatus: 'complete' }, { usernameKey: 'ana-user2' }, { other: 1 }, { nombre: ' ' }, { apellido: 4 }, { username: 'short' }, { avatarUrl: '' }, { avatarUrl: 'not-a-url' }, { avatarUrl: 'http://example.com' }])('rejects invalid input %j', async (input) => {
     const response = await patch().send(input); expect(response.status).toBe(400); expect(response.body.code).toBe('VALIDATION_ERROR'); expect(mocks.updateUserProfile).not.toHaveBeenCalled();
   });
   it('requires authentication', async () => {
