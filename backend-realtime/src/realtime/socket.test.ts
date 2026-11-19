@@ -1,8 +1,13 @@
 import { ProfileAuthorizationError } from '../services/profile-state.service';
 import { createServer, type Server } from 'node:http';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ verifyToken: vi.fn(), requireActiveAccount: vi.fn(), startAccountAuthorization: vi.fn(), watchAccountDeletion: vi.fn(), requireCompleteProfile: vi.fn() }));
+const mocks = vi.hoisted(() => ({ verifyToken: vi.fn(), requireActiveAccount: vi.fn(), startAccountAuthorization: vi.fn(), watchAccountDeletion: vi.fn(), requireCompleteProfile: vi.fn(), ensureRoomAccessible: vi.fn(), persistRoomMessage: vi.fn() }));
 vi.mock('../services/profile-state.service', async original => ({ ...await original<typeof import('../services/profile-state.service')>(), requireCompleteProfile: mocks.requireCompleteProfile }));
+vi.mock('../services/room-chat.service', async original => ({
+  ...await original<typeof import('../services/room-chat.service')>(),
+  ensureRoomAccessible: mocks.ensureRoomAccessible,
+  persistRoomMessage: mocks.persistRoomMessage,
+}));
 vi.mock('../services/firebase-auth.service', () => ({ verifyToken: mocks.verifyToken }));
 vi.mock('../services/account-state.service', async (original) => ({ ...await original<typeof import('../services/account-state.service')>(), requireActiveAccount: mocks.requireActiveAccount, startAccountAuthorization: mocks.startAccountAuthorization }));
 vi.mock('../config/firebase', async (original) => ({
@@ -10,6 +15,7 @@ vi.mock('../config/firebase', async (original) => ({
   watchAccountDeletion: mocks.watchAccountDeletion,
 }));
 import { AccountAuthorizationError, withAuthorizationTimeout } from '../services/account-state.service';
+import { RoomChatError } from '../services/room-chat.service';
 import { createRealtimeServer } from './socket';
 import { TestSocketClient } from '../integration/socket-client';
 let http: Server; let io: ReturnType<typeof createRealtimeServer>; let origin: string; let clients: TestSocketClient[];
@@ -18,6 +24,8 @@ beforeEach(async () => {
   mocks.verifyToken.mockImplementation(async (token) => ({ uid: token, email_verified: true }));
   mocks.requireActiveAccount.mockResolvedValue(undefined);
   mocks.requireCompleteProfile.mockResolvedValue(undefined);
+  mocks.ensureRoomAccessible.mockResolvedValue(undefined);
+  mocks.persistRoomMessage.mockImplementation(async (_roomId, uid, text) => ({ messageId: 'msg-1', authorId: uid, text, createdAt: new Date().toISOString() }));
   mocks.watchAccountDeletion.mockImplementation((_uid, changed) => { queueMicrotask(() => changed(false)); return vi.fn(); });
   mocks.startAccountAuthorization.mockImplementation((uid) => {
     const authorized = mocks.requireActiveAccount(uid);
@@ -293,4 +301,26 @@ it.each(['PROFILE_INCOMPLETE', 'PROFILE_INCONSISTENT', 'AUTHORIZATION_UNAVAILABL
   expect(await client({ token: 'trusted', profileStatus: 'complete' }).wait('connect_error')).toMatchObject({ message: code, data: { code } });
   expect(mocks.requireCompleteProfile).toHaveBeenCalledExactlyOnceWith('trusted');
   expect(mocks.watchAccountDeletion).not.toHaveBeenCalled(); expect(io.sockets.sockets.size).toBe(0);
+});
+
+it.each(['ROOM_NOT_FOUND', 'ROOM_ACCESS_DENIED'] as const)('rejects room:join with %s without joining or leaving current room', async (code) => {
+  const value = await connected();
+  await value.request('room:join', { roomId: 'existing' });
+  mocks.ensureRoomAccessible.mockRejectedValueOnce(new RoomChatError(code));
+  expect(await value.request('room:join', { roomId: 'blocked' })).toMatchObject({ ok: false, error: { code } });
+  expect(io.sockets.adapter.rooms.has('blocked')).toBe(false);
+  expect(io.sockets.adapter.rooms.get('existing')?.size).toBe(1);
+});
+
+it('persists chat:send messages in Firestore before broadcasting and fails closed on persistence error', async () => {
+  const value = await connected('sender');
+  await value.request('room:join', { roomId: 'room-1' });
+  expect(await value.request('chat:send', { text: 'Hola sala' })).toEqual({ ok: true });
+  expect(mocks.persistRoomMessage).toHaveBeenCalledWith('room-1', 'sender', 'Hola sala');
+  expect(value.received.find(([name]) => name === 'chat:message')?.[1]).toMatchObject({ messageId: 'msg-1', authorId: 'sender', text: 'Hola sala' });
+
+  const before = value.received.length;
+  mocks.persistRoomMessage.mockRejectedValueOnce(new RoomChatError('EVENT_FAILED'));
+  expect(await value.request('chat:send', { text: 'No persistido' })).toMatchObject({ ok: false, error: { code: 'EVENT_FAILED' } });
+  expect(value.received.slice(before).some(([name]) => name === 'chat:message')).toBe(false);
 });

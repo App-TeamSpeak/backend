@@ -6,6 +6,7 @@ import { env } from '../config/env';
 import { FirebaseConfigurationError } from '../config/firebase';
 import { verifyToken } from '../services/firebase-auth.service';
 import { AccountAuthorizationError, requireActiveAccount, startAccountAuthorization, withAuthorizationTimeout } from '../services/account-state.service';
+import { ensureRoomAccessible, persistRoomMessage, RoomChatError } from '../services/room-chat.service';
 
 const lifecycles = new WeakMap<Server, { stop(): void; drain(): Promise<void> }>();
 export function getRealtimeLifecycle(io: Server) {
@@ -27,6 +28,8 @@ const messages = {
   ACCOUNT_UNAVAILABLE: 'La cuenta no puede realizar esta operación.',
   AUTHORIZATION_UNAVAILABLE: 'No se pudo comprobar la autorización.',
   ROOM_ID_REQUIRED: 'roomId es obligatorio.',
+  ROOM_NOT_FOUND: 'La sala no existe.',
+  ROOM_ACCESS_DENIED: 'No tienes acceso a esta sala.',
   MESSAGE_INVALID: 'El mensaje no es válido.',
   EVENT_FAILED: 'No se pudo completar el evento.',
 };
@@ -154,6 +157,13 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
           ack?.({ ok: true });
           return;
         }
+        try {
+          await ensureRoomAccessible(roomId, socket.data.user.uid);
+        } catch (error) {
+          report(socket, error instanceof RoomChatError ? error.code : 'AUTHORIZATION_UNAVAILABLE', ack);
+          return;
+        }
+        if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
         await leaveRoom(socket);
         if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
         await socket.join(roomId);
@@ -176,13 +186,19 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       try { if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; } await leaveRoom(socket); ack?.({ ok: true }); }
       finally { release(); }
     });
-    protect('chat:send', (payload, _allowed, ack) => {
+    protect('chat:send', async (payload, allowed, ack) => {
       const value = field(payload, 'text');
       const message = typeof value === 'string' ? value.trim() : '';
       const roomId = socket.data.roomId as string | undefined;
       if (!roomId || !message || message.length > 2000) { report(socket, 'MESSAGE_INVALID', ack); return; }
-      io.to(roomId).emit('chat:message', { authorId: socket.data.user.uid, text: message, createdAt: new Date().toISOString() });
-      ack?.({ ok: true });
+      try {
+        const saved = await persistRoomMessage(roomId, socket.data.user.uid, message);
+        if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
+        io.to(roomId).emit('chat:message', saved);
+        ack?.({ ok: true });
+      } catch (error) {
+        report(socket, error instanceof RoomChatError ? error.code : 'EVENT_FAILED', ack);
+      }
     });
     for (const event of ['webrtc:offer', 'webrtc:answer', 'webrtc:ice-candidate', 'media:state', 'screen:state']) {
       protect(event, (payload, _allowed, ack) => {

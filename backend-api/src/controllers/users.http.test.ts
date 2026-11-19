@@ -74,15 +74,16 @@ describe('PATCH /api/users/me', () => {
     mocks.verifyIdToken.mockResolvedValue({ uid: 'uid-1', email: 'ana@example.com', email_verified: true });
   });
   const patch = () => request(app).patch('/api/users/me').set('Authorization', 'Bearer test-token');
-  it.each([{ nombre: ' Ana María ' }, { apellido: 'García' }, { avatarUrl: null }, { username: 'Ana-User2' }])('updates allowed partial input %j', async (input) => {
+  it.each([{ nombre: ' Ana María ' }, { apellido: 'García' }, { email: ' Ana.Nueva@Example.com ' }, { avatarUrl: null }, { username: 'Ana-User2' }])('updates allowed partial input %j', async (input) => {
     mocks.updateUserProfile.mockResolvedValue(data);
     const response = await patch().send(input);
     expect(response.status).toBe(200); expect(response.body).toEqual({ success: true, data });
     expect(response.headers['cache-control']).toBe('no-store');
-    expect(mocks.updateUserProfile).toHaveBeenCalledWith({ uid: 'uid-1', email: 'ana@example.com', emailVerified: true }, 'nombre' in input ? { nombre: 'Ana María' } : input);
+    const expected = 'nombre' in input ? { nombre: 'Ana María' } : 'email' in input ? { email: 'ana.nueva@example.com' } : input;
+    expect(mocks.updateUserProfile).toHaveBeenCalledWith({ uid: 'uid-1', email: 'ana@example.com', emailVerified: true }, expected);
     if (!('avatarUrl' in input)) expect(mocks.updateUserProfile.mock.calls[0][1]).not.toHaveProperty('avatarUrl');
   });
-  it.each([{}, { uid: 'other' }, { email: 'other@example.com' }, { createdAt: 'x' }, { updatedAt: 'x' }, { profileStatus: 'complete' }, { usernameKey: 'ana-user2' }, { other: 1 }, { nombre: ' ' }, { apellido: 4 }, { username: 'short' }, { avatarUrl: '' }, { avatarUrl: 'not-a-url' }, { avatarUrl: 'http://example.com' }])('rejects invalid input %j', async (input) => {
+  it.each([{}, { uid: 'other' }, { email: 'not-an-email' }, { createdAt: 'x' }, { updatedAt: 'x' }, { profileStatus: 'complete' }, { usernameKey: 'ana-user2' }, { other: 1 }, { nombre: ' ' }, { apellido: 4 }, { username: 'short' }, { avatarUrl: '' }, { avatarUrl: 'not-a-url' }, { avatarUrl: 'http://example.com' }])('rejects invalid input %j', async (input) => {
     const response = await patch().send(input); expect(response.status).toBe(400); expect(response.body.code).toBe('VALIDATION_ERROR'); expect(mocks.updateUserProfile).not.toHaveBeenCalled();
   });
   it('requires authentication', async () => {
@@ -93,7 +94,7 @@ describe('PATCH /api/users/me', () => {
     mocks.verifyIdToken.mockRejectedValueOnce(new Error('private'));
     expect((await patch().send({ nombre: 'Ana' })).body.code).toBe('AUTH_INVALID'); expect(mocks.updateUserProfile).not.toHaveBeenCalled();
   });
-  it.each([[404, 'PROFILE_NOT_FOUND'], [409, 'PROFILE_INCOMPLETE'], [409, 'PROFILE_INCONSISTENT'], [409, 'USERNAME_TAKEN'], [503, 'FIRESTORE_UNAVAILABLE'], [500, 'INTERNAL_ERROR']] as const)('preserves %s %s', async (status, code) => {
+  it.each([[404, 'PROFILE_NOT_FOUND'], [409, 'PROFILE_INCOMPLETE'], [409, 'PROFILE_INCONSISTENT'], [409, 'USERNAME_TAKEN'], [409, 'EMAIL_TAKEN'], [503, 'FIRESTORE_UNAVAILABLE'], [500, 'INTERNAL_ERROR']] as const)('preserves %s %s', async (status, code) => {
     mocks.updateUserProfile.mockRejectedValueOnce(new AppError(status, code, 'Error controlado.'));
     const response = await patch().send({ nombre: 'Ana' }); expect(response.status).toBe(status); expect(response.body).toEqual({ success: false, code, message: 'Error controlado.' });
   });

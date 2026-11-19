@@ -54,6 +54,7 @@ describe('OpenAPI user contracts', () => {
   it('documents partial input without required fields and rejects empty/unknown payloads', () => {
     const schema = openapi.components.schemas.UserPatch;
     expect(matches({ nombre: ' Ana María ' }, schema)).toBe(true);
+    expect(matches({ email: 'ana@example.com' }, schema)).toBe(true);
     expect(matches({ avatarUrl: null }, schema)).toBe(true);
     expect(matches({}, schema)).toBe(false);
     expect(matches({ uid: 'other' }, schema)).toBe(false);
