@@ -2,9 +2,10 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppError } from '../middleware/errors';
 vi.mock('../services/account-state.service', () => ({ ensureAccountActive: async () => undefined }));
-const mocks = vi.hoisted(() => ({ verifyIdToken: vi.fn(), getFirebaseAuth: vi.fn(), getUserProfile: vi.fn(), createUserProfile: vi.fn(), updateUserProfile: vi.fn() }));
+const mocks = vi.hoisted(() => ({ verifyIdToken: vi.fn(), getFirebaseAuth: vi.fn(), getUserProfile: vi.fn(), createUserProfile: vi.fn(), updateUserProfile: vi.fn(), deleteAccountImmediately: vi.fn() }));
 vi.mock('../config/firebase', () => ({ getFirebaseAuth: mocks.getFirebaseAuth }));
 vi.mock('../services/users.service', () => ({ getUserProfile: mocks.getUserProfile, createUserProfile: mocks.createUserProfile, updateUserProfile: mocks.updateUserProfile }));
+vi.mock('../services/account-deletion.service', () => ({ deleteAccountImmediately: mocks.deleteAccountImmediately }));
 import { app } from '../app';
 const body = { nombre: 'Ana', apellido: 'Pérez', username: ' ANA_User1 ' };
 const data = { uid: 'uid-1', profileStatus: 'complete', profile: { uid: 'uid-1', email: 'ana@example.com', nombre: 'Ana', apellido: 'Pérez', username: 'ANA_User1', usernameKey: 'ana_user1', avatarUrl: null, profileStatus: 'complete', createdAt: '2026-11-09T00:00:00.000Z', updatedAt: '2026-11-09T00:00:00.000Z' } };
@@ -96,5 +97,44 @@ describe('PATCH /api/users/me', () => {
   it.each([[404, 'PROFILE_NOT_FOUND'], [409, 'PROFILE_INCOMPLETE'], [409, 'PROFILE_INCONSISTENT'], [409, 'USERNAME_TAKEN'], [409, 'EMAIL_TAKEN'], [503, 'FIRESTORE_UNAVAILABLE'], [500, 'INTERNAL_ERROR']] as const)('preserves %s %s', async (status, code) => {
     mocks.updateUserProfile.mockRejectedValueOnce(new AppError(status, code, 'Error controlado.'));
     const response = await patch().send({ nombre: 'Ana' }); expect(response.status).toBe(status); expect(response.body).toEqual({ success: false, code, message: 'Error controlado.' });
+  });
+});
+
+describe('DELETE /api/users/me', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mocks.getFirebaseAuth.mockReturnValue({ verifyIdToken: mocks.verifyIdToken });
+    mocks.verifyIdToken.mockResolvedValue({ uid: 'uid-1', email: 'ana@example.com' });
+  });
+  const remove = () => request(app).delete('/api/users/me').set('Authorization', 'Bearer test-token');
+
+  it('requires authentication', async () => {
+    const response = await request(app).delete('/api/users/me');
+    expect(response.status).toBe(401);
+    expect(response.body.code).toBe('AUTH_REQUIRED');
+    expect(mocks.deleteAccountImmediately).not.toHaveBeenCalled();
+  });
+
+  it('rejects any request body with 400 VALIDATION_ERROR', async () => {
+    const response = await remove().send({ confirm: true });
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('VALIDATION_ERROR');
+    expect(mocks.deleteAccountImmediately).not.toHaveBeenCalled();
+  });
+
+  it('deletes account and returns 200 with status deleted', async () => {
+    mocks.deleteAccountImmediately.mockResolvedValueOnce({ status: 'deleted' });
+    const response = await remove();
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body).toEqual({ success: true, data: { status: 'deleted' } });
+    expect(mocks.deleteAccountImmediately).toHaveBeenCalledExactlyOnceWith('uid-1');
+  });
+
+  it.each([[409, 'ACCOUNT_DELETED'], [409, 'ACCOUNT_DELETION_BLOCKED'], [503, 'AUTH_UNAVAILABLE'], [503, 'FIRESTORE_UNAVAILABLE']] as const)('preserves controlled error %s %s', async (status, code) => {
+    mocks.deleteAccountImmediately.mockRejectedValueOnce(new AppError(status, code, 'Error controlado.'));
+    const response = await remove();
+    expect(response.status).toBe(status);
+    expect(response.body).toEqual({ success: false, code, message: 'Error controlado.' });
   });
 });

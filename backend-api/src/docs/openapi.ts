@@ -176,16 +176,15 @@ export const openapi = {
         },
       },
       delete: {
-        tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Inicio de eliminación provisional, solo en pruebas aisladas',
-        description: 'Deshabilitado públicamente: 501. Solo se habilita con NODE_ENV=test, proyecto demo-teamspeak-tests, ambos emuladores locales y activación explícita de la suite. No admite cuerpo. Verifica revocación con Firebase Admin; una intención nueva requiere auth_time entero, no futuro y de máximo 300 segundos. Una intención pending válida puede repetirse con identidad vigente sin reiniciar progreso ni exigir de nuevo autenticación reciente. 202 solo significa intención persistida; NO elimina identidad, perfil o reservas. Estados blocked/completed/malformados no se reinician. US-05 deberá reautenticar mediante credencial de correo/contraseña o proveedor Google y obtener un token actualizado. TS-01.4C/4D siguen pendientes.',
+        tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Elimina definitivamente la cuenta autenticada',
+        description: 'Elimina la cuenta en Firebase Authentication, el documento del usuario en Firestore, libera las reservas de username y elimina las salas propias con sus miembros y mensajes asociados. No admite cuerpo. Cache-Control: no-store.',
         responses: {
-          202: { description: 'Intención pending creada o reutilizada; eliminación no completada', content: { 'application/json': { schema: {
-            type: 'object', required: ['success', 'data'], properties: { success: { type: 'boolean', enum: [true] }, data: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['pending'] } } } },
-          }, example: { success: true, data: { status: 'pending' } } } } },
+          200: { description: 'Cuenta eliminada definitivamente', content: { 'application/json': { schema: {
+            type: 'object', required: ['success', 'data'], properties: { success: { type: 'boolean', enum: [true] }, data: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['deleted'] } } } },
+          }, example: { success: true, data: { status: 'deleted' } } } } },
           400: { description: 'VALIDATION_ERROR (cuerpo no permitido) o INVALID_JSON' },
-          401: { description: 'AUTH_REQUIRED, AUTH_INVALID, AUTH_EXPIRED, AUTH_REVOKED, AUTH_USER_DISABLED, AUTH_USER_DELETED o AUTH_RECENT_REQUIRED' },
-          409: { description: 'PROFILE_INCONSISTENT, ACCOUNT_DELETION_BLOCKED, ACCOUNT_DELETED o ACCOUNT_DELETION_INCONSISTENT' },
-          501: { description: 'NOT_IMPLEMENTED: endpoint deshabilitado fuera de pruebas aisladas' },
+          401: { description: 'AUTH_REQUIRED o AUTH_INVALID' },
+          409: { description: 'ACCOUNT_DELETION_BLOCKED, ACCOUNT_DELETED o ACCOUNT_DELETION_INCONSISTENT' },
           503: { description: 'AUTH_UNAVAILABLE o FIRESTORE_UNAVAILABLE' },
           500: { description: 'INTERNAL_ERROR' },
         },
