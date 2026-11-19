@@ -43,7 +43,10 @@ export const deleteMe: RequestHandler = async (request, response) => {
   if (request.body !== undefined || (request.header('content-length') && request.header('content-length') !== '0') || request.header('transfer-encoding')) {
     throw new AppError(400, 'VALIDATION_ERROR', 'DELETE no admite cuerpo de solicitud.');
   }
-  const data = await requestAccountDeletion(request.user);
+  const clientStatusToken = request.header('x-deletion-status-token')?.trim() || undefined;
+  const data = clientStatusToken
+    ? await requestAccountDeletion(request.user, undefined, undefined, clientStatusToken)
+    : await requestAccountDeletion(request.user);
   if (!response.destroyed) response.status(data.status === 'completed' ? 200 : 202).json({ success: true, data });
 };
 

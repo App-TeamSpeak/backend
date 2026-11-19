@@ -52,7 +52,8 @@ async function authenticateRequest(
   let firebaseAuth;
   try {
     firebaseAuth = getFirebaseAuth();
-  } catch {
+  } catch (error) {
+    if (error instanceof AppError) throw error;
     throw new AppError(503, 'AUTH_UNAVAILABLE', 'La autenticación no está configurada.');
   }
 

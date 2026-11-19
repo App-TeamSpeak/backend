@@ -178,17 +178,20 @@ export const openapi = {
       },
       delete: {
         tags: ['Users'], security: [{ bearerAuth: [] }], summary: 'Solicita y ejecuta la eliminación definitiva y recuperable de la cuenta',
-        description: 'Exige revocación y auth_time <= 300s (401 AUTH_RECENT_REQUIRED) para solicitudes nuevas; reintentos de una solicitud pending no exigen reautenticación. Ejecuta fases pending -> cleanup -> auth -> completed con lease distribuido. Elimina salas propias (y subcolecciones), membresías ajenas, anonimiza mensajes en salas ajenas (senderId=null, authorDeleted=true), elimina perfil y reservas de username, y elimina identidad en Firebase Auth. Devuelve statusToken opaco para consultar el resultado definitivo incluso tras eliminar la identidad en Auth. No admite cuerpo. Cache-Control: no-store.',
+        description: 'Exige revocación y auth_time <= 300s (401 AUTH_RECENT_REQUIRED) para solicitudes nuevas; reintentos de una solicitud pending no exigen reautenticación. Acepta opcionalmente el header X-Deletion-Status-Token (32–128 caracteres URL-safe) generado previamente por el cliente para sobrevivir pérdida de respuesta HTTP; almacena únicamente su hash SHA-256 y nunca sobrescribe un comprobante vigente. Ejecuta fases pending -> cleanup -> auth -> completed con lease distribuido renovable. Reconciliador productivo habilitable vía TEAMSPEAK_ENABLE_DELETION_RECONCILER=true. No admite cuerpo. Cache-Control: no-store.',
+        parameters: [
+          { name: 'X-Deletion-Status-Token', in: 'header', required: false, schema: { type: 'string', minLength: 32, maxLength: 128 }, description: 'Comprobante opaco pre-generado por el cliente antes de enviar DELETE.' },
+        ],
         responses: {
           200: { description: 'Cuenta eliminada definitivamente', content: { 'application/json': { schema: {
-            type: 'object', required: ['success', 'data'], properties: { success: { type: 'boolean', enum: [true] }, data: { type: 'object', required: ['status', 'statusToken'], properties: { status: { type: 'string', enum: ['completed'] }, statusToken: { type: 'string' } } } },
+            type: 'object', required: ['success', 'data'], properties: { success: { type: 'boolean', enum: [true] }, data: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['completed'] }, statusToken: { type: 'string' } } } },
           }, example: { success: true, data: { status: 'completed', statusToken: 'opaque-status-token' } } } } },
           202: { description: 'Eliminación en progreso (recuperable por reintento o reconciliador)', content: { 'application/json': { schema: {
-            type: 'object', required: ['success', 'data'], properties: { success: { type: 'boolean', enum: [true] }, data: { type: 'object', required: ['status', 'statusToken'], properties: { status: { type: 'string', enum: ['pending'] }, statusToken: { type: 'string' } } } },
+            type: 'object', required: ['success', 'data'], properties: { success: { type: 'boolean', enum: [true] }, data: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['pending'] }, statusToken: { type: 'string' } } } },
           }, example: { success: true, data: { status: 'pending', statusToken: 'opaque-status-token' } } } } },
-          400: { description: 'VALIDATION_ERROR (cuerpo no permitido) o INVALID_JSON' },
+          400: { description: 'VALIDATION_ERROR (cuerpo no permitido o X-Deletion-Status-Token inválido) o INVALID_JSON' },
           401: { description: 'AUTH_REQUIRED, AUTH_INVALID, AUTH_EXPIRED, AUTH_REVOKED, AUTH_USER_DISABLED, AUTH_USER_DELETED o AUTH_RECENT_REQUIRED' },
-          409: { description: 'ACCOUNT_DELETION_BLOCKED, ACCOUNT_DELETION_INCONSISTENT o PROFILE_INCONSISTENT' },
+          409: { description: 'ACCOUNT_DELETION_BLOCKED, DELETION_STATUS_TOKEN_MISMATCH, ACCOUNT_DELETION_INCONSISTENT o PROFILE_INCONSISTENT' },
           503: { description: 'AUTH_UNAVAILABLE o FIRESTORE_UNAVAILABLE' },
           500: { description: 'INTERNAL_ERROR' },
         },
