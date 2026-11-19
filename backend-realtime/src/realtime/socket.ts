@@ -6,7 +6,7 @@ import { env } from '../config/env';
 import { FirebaseConfigurationError } from '../config/firebase';
 import { verifyToken } from '../services/firebase-auth.service';
 import { AccountAuthorizationError, requireActiveAccount, startAccountAuthorization, withAuthorizationTimeout } from '../services/account-state.service';
-import { ensureRoomAccessible, persistRoomMessage, RoomChatError } from '../services/room-chat.service';
+import { ensureRoomAccessible, persistRoomMessage, RoomChatError, watchRoomAccess } from '../services/room-chat.service';
 
 const lifecycles = new WeakMap<Server, { stop(): void; drain(): Promise<void> }>();
 export function getRealtimeLifecycle(io: Server) {
@@ -51,10 +51,15 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
   const access = createAccountAccess();
   let stopping = false;
   const pendingReads = new Set<Promise<void>>();
-  lifecycles.set(io, { stop: () => { stopping = true; access.close(); }, drain: async () => { await Promise.all([...pendingReads]); } });
+  const roomWatchers = new Set<() => void>();
+  const closeRoomWatchers = () => {
+    for (const stop of [...roomWatchers]) stop();
+    roomWatchers.clear();
+  };
+  lifecycles.set(io, { stop: () => { stopping = true; access.close(); closeRoomWatchers(); }, drain: async () => { await Promise.all([...pendingReads]); } });
   const close = io.close.bind(io);
   io.close = ((callback?: (error?: Error) => void) => {
-    stopping = true; access.close();
+    stopping = true; access.close(); closeRoomWatchers();
     return close(callback);
   }) as typeof io.close;
 
@@ -138,6 +143,45 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       });
     }
 
+    const detachRoomWatcher = () => {
+      const stop = socket.data.roomWatcher as (() => void) | undefined;
+      delete socket.data.roomWatcher;
+      if (stop) {
+        roomWatchers.delete(stop);
+        stop();
+      }
+    };
+    const revokeRoomAccess = (expectedRoomId: string, generation: number, code: 'ROOM_NOT_FOUND' | 'ROOM_ACCESS_DENIED') => {
+      if (socket.data.roomId !== expectedRoomId || socket.data.roomGeneration !== generation) return;
+      socket.data.roomGeneration = generation + 1;
+      delete socket.data.roomId;
+      detachRoomWatcher();
+      void (async () => {
+        try { await socket.leave(expectedRoomId); }
+        finally {
+          if (socket.connected) {
+            socket.emit('room:access-revoked', { roomId: expectedRoomId, code });
+            socket.to(expectedRoomId).emit('room:participant-left', { userId: socket.data.user.uid });
+          }
+        }
+      })();
+    };
+    const attachRoomWatcher = (roomId: string, generation: number) => {
+      detachRoomWatcher();
+      const stop = watchRoomAccess(
+        roomId,
+        socket.data.user.uid,
+        (code) => revokeRoomAccess(roomId, generation, code),
+        () => revokeRoomAccess(roomId, generation, 'ROOM_ACCESS_DENIED'),
+      );
+      if (socket.data.roomId === roomId && socket.data.roomGeneration === generation && socket.connected && !stopping) {
+        socket.data.roomWatcher = stop;
+        roomWatchers.add(stop);
+      } else {
+        stop();
+      }
+    };
+
     protect('room:join', async (payload, allowed, ack) => {
       const value = field(payload, 'roomId');
       const roomId = typeof value === 'string' ? value.trim() : '';
@@ -149,7 +193,22 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       await previous;
       try {
         if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
+        try {
+          await ensureRoomAccessible(roomId, socket.data.user.uid);
+        } catch (error) {
+          const code = error instanceof RoomChatError ? error.code : 'AUTHORIZATION_UNAVAILABLE';
+          if (socket.data.roomId === roomId && (code === 'ROOM_NOT_FOUND' || code === 'ROOM_ACCESS_DENIED')) {
+            await leaveRoom(socket, detachRoomWatcher);
+            if (socket.connected) socket.emit('room:access-revoked', { roomId, code });
+          }
+          report(socket, code, ack);
+          return;
+        }
+        if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
         if (socket.data.roomId === roomId) {
+          if (!socket.data.roomWatcher) {
+            attachRoomWatcher(roomId, (socket.data.roomGeneration as number | undefined) ?? 0);
+          }
           const participants = Array.from(io.sockets.adapter.rooms.get(roomId) ?? [])
             .map(socketId => io.sockets.sockets.get(socketId)?.data.user?.uid)
             .filter((uid): uid is string => Boolean(uid));
@@ -157,18 +216,14 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
           ack?.({ ok: true });
           return;
         }
-        try {
-          await ensureRoomAccessible(roomId, socket.data.user.uid);
-        } catch (error) {
-          report(socket, error instanceof RoomChatError ? error.code : 'AUTHORIZATION_UNAVAILABLE', ack);
-          return;
-        }
-        if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
-        await leaveRoom(socket);
+        await leaveRoom(socket, detachRoomWatcher);
         if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
         await socket.join(roomId);
         if (!allowed()) { await socket.leave(roomId); report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
+        const generation = ((socket.data.roomGeneration as number | undefined) ?? 0) + 1;
         socket.data.roomId = roomId;
+        socket.data.roomGeneration = generation;
+        attachRoomWatcher(roomId, generation);
         socket.to(roomId).emit('room:participant-joined', { userId: socket.data.user.uid });
         const participants = Array.from(io.sockets.adapter.rooms.get(roomId) ?? [])
           .map(socketId => io.sockets.sockets.get(socketId)?.data.user?.uid)
@@ -183,17 +238,35 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       let release!: () => void;
       transitions = new Promise<void>((resolve) => { release = resolve; });
       await previous;
-      try { if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; } await leaveRoom(socket); ack?.({ ok: true }); }
+      try { if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; } await leaveRoom(socket, detachRoomWatcher); ack?.({ ok: true }); }
       finally { release(); }
     });
     protect('chat:send', async (payload, allowed, ack) => {
       const value = field(payload, 'text');
       const message = typeof value === 'string' ? value.trim() : '';
       const roomId = socket.data.roomId as string | undefined;
+      const generation = socket.data.roomGeneration as number | undefined;
       if (!roomId || !message || message.length > 2000) { report(socket, 'MESSAGE_INVALID', ack); return; }
       try {
+        await ensureRoomAccessible(roomId, socket.data.user.uid);
+      } catch (error) {
+        const code = error instanceof RoomChatError ? error.code : 'AUTHORIZATION_UNAVAILABLE';
+        if (code === 'ROOM_NOT_FOUND' || code === 'ROOM_ACCESS_DENIED') {
+          revokeRoomAccess(roomId, generation ?? 0, code);
+        }
+        report(socket, code, ack);
+        return;
+      }
+      if (!allowed() || socket.data.roomId !== roomId || socket.data.roomGeneration !== generation) {
+        report(socket, 'ROOM_ACCESS_DENIED', ack);
+        return;
+      }
+      try {
         const saved = await persistRoomMessage(roomId, socket.data.user.uid, message);
-        if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
+        if (!allowed() || socket.data.roomId !== roomId || socket.data.roomGeneration !== generation) {
+          report(socket, 'ROOM_ACCESS_DENIED', ack);
+          return;
+        }
         io.to(roomId).emit('chat:message', saved);
         ack?.({ ok: true });
       } catch (error) {
@@ -201,23 +274,30 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       }
     });
     for (const event of ['webrtc:offer', 'webrtc:answer', 'webrtc:ice-candidate', 'media:state', 'screen:state']) {
-      protect(event, (payload, _allowed, ack) => {
+      protect(event, (payload, allowed, ack) => {
         const roomId = socket.data.roomId as string | undefined;
-        if (roomId) socket.to(roomId).emit(event, { fromUserId: socket.data.user.uid, payload });
+        const generation = socket.data.roomGeneration as number | undefined;
+        if (roomId && socket.data.roomGeneration === generation && allowed()) {
+          socket.to(roomId).emit(event, { fromUserId: socket.data.user.uid, payload });
+        }
         ack?.({ ok: true });
       });
     }
     socket.on('disconnect', () => {
       // Socket.IO removes memberships itself. Notify using retained logical room ID.
       const roomId = socket.data.roomId as string | undefined;
+      socket.data.roomGeneration = ((socket.data.roomGeneration as number | undefined) ?? 0) + 1;
       delete socket.data.roomId;
+      detachRoomWatcher();
       if (roomId) socket.to(roomId).emit('room:participant-left', { userId: socket.data.user.uid });
     });
   });
   return io;
 }
-async function leaveRoom(socket: Socket): Promise<void> {
+async function leaveRoom(socket: Socket, detachWatcher?: () => void): Promise<void> {
   const roomId = socket.data.roomId as string | undefined;
+  socket.data.roomGeneration = ((socket.data.roomGeneration as number | undefined) ?? 0) + 1;
+  detachWatcher?.();
   if (!roomId) return;
   delete socket.data.roomId;
   await socket.leave(roomId);
