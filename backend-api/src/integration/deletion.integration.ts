@@ -329,4 +329,56 @@ describe('DELETE intent with real Authentication and Firestore emulators', () =>
     expect(await snapshot()).toEqual(before);expect((await auth.getUser(identity.uid)).uid).toBe(identity.uid);
   });
 
+  it('US-05 emulator: pre-generated X-Deletion-Status-Token tracks definitive completion even after Auth deletion', async () => {
+    const idToken = await token();
+    await createUserProfile(identity, body, db);
+    const clientToken = `EmulatorReceipt_${randomUUID().replace(/-/g, '')}`;
+    const delRes = await request(app)
+      .delete('/api/users/me')
+      .set('Authorization', `Bearer ${idToken}`)
+      .set('X-Deletion-Status-Token', clientToken);
+    expect(delRes.status).toBe(200);
+    expect(delRes.body).toEqual({ success: true, data: { status: 'completed', statusToken: clientToken } });
+    await expect(auth.getUser(identity.uid)).rejects.toMatchObject({ code: 'auth/user-not-found' });
+
+    const statusRes = await request(app)
+      .get('/api/users/me/deletion-status')
+      .set('X-Deletion-Status-Token', clientToken);
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.body).toEqual({ success: true, data: { status: 'completed' } });
+  });
+
+  it('US-05 emulator: runtime reconciler resumes pending cleanup after simulated server restart', async () => {
+    await token();
+    await createUserProfile(identity, body, db);
+    const stamp = Timestamp.now();
+    await db.doc(`accountDeletions/${identity.uid}`).create({
+      status: 'pending',
+      phase: 'cleanup',
+      usernameKeys: ['ana-user1'],
+      attempts: 1,
+      requestedAt: stamp,
+      updatedAt: stamp,
+    });
+    const prevTestFlag = process.env.TEAMSPEAK_ENABLE_DELETION_RECONCILER_TESTS;
+    const prevRuntimeFlag = process.env.TEAMSPEAK_ENABLE_DELETION_RECONCILER;
+    delete process.env.TEAMSPEAK_ENABLE_DELETION_RECONCILER_TESTS;
+    process.env.TEAMSPEAK_ENABLE_DELETION_RECONCILER = 'true';
+    try {
+      const reconciler = createAccountDeletionReconciler({ db, auth });
+      const result = await reconciler.runOnce();
+      await reconciler.stop();
+      expect(result.processed).toBe(1);
+    } finally {
+      if (prevTestFlag === undefined) delete process.env.TEAMSPEAK_ENABLE_DELETION_RECONCILER_TESTS;
+      else process.env.TEAMSPEAK_ENABLE_DELETION_RECONCILER_TESTS = prevTestFlag;
+      if (prevRuntimeFlag === undefined) delete process.env.TEAMSPEAK_ENABLE_DELETION_RECONCILER;
+      else process.env.TEAMSPEAK_ENABLE_DELETION_RECONCILER = prevRuntimeFlag;
+    }
+    await expect(auth.getUser(identity.uid)).rejects.toMatchObject({ code: 'auth/user-not-found' });
+    expect((await db.doc(`accountDeletions/${identity.uid}`).get()).data()?.status).toBe('completed');
+    expect((await snapshot()).users).toEqual([]);
+    expect((await snapshot()).usernames).toEqual([]);
+  });
+
 });
