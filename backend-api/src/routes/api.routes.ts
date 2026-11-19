@@ -1,7 +1,6 @@
 import { authorizationContext } from '../middleware/authorization-context';
 import { requireCompleteProfile } from '../middleware/complete-profile';
 import { deleteMe } from '../controllers/users.controller';
-import { requireDeletionAuth, requireDeletionTests } from '../middleware/deletion-auth';
 import { requireVerifiedEmail } from '../middleware/email-verified';
 import { Router } from 'express';
 import { requireActiveAccount } from '../middleware/account-active';
@@ -11,7 +10,7 @@ import { roomsRouter } from './rooms.routes';
 
 export const apiRouter = Router();
 
-apiRouter.delete('/users/me', requireDeletionTests, requireDeletionAuth, deleteMe);
+apiRouter.delete('/users/me', requireAuth, deleteMe);
 apiRouter.use(requireAuth);
 apiRouter.use(authorizationContext);
 apiRouter.use(requireActiveAccount);

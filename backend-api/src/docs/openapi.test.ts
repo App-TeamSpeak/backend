@@ -74,17 +74,13 @@ describe('OpenAPI user contracts', () => {
       expect(route[method].responses[403].description).toContain('ACCOUNT_DELETION_BLOCKED');
       expect(route[method].responses[403].description).toContain('ACCOUNT_DELETED');
     }
-    expect(route.delete.responses[501]).toBeDefined();
+    expect(route.delete.responses[200]).toBeDefined();
   });
 
-  it('documents DELETE as test-only acceptance without completed success or request body', () => {
+  it('documents DELETE account deletion without request body', () => {
     const route = openapi.paths['/api/users/me'].delete;
-    expect(route.description).toContain('Deshabilitado públicamente: 501');
-    expect(route.description).toContain('300 segundos');
     expect(route).not.toHaveProperty('requestBody');
-    expect(route.responses).not.toHaveProperty('200');
-    expect(route.responses[202].content['application/json'].example).toEqual({ success: true, data: { status: 'pending' } });
-    expect(route.responses[401].description).toContain('AUTH_RECENT_REQUIRED');
+    expect(route.responses[200].content['application/json'].example).toEqual({ success: true, data: { status: 'deleted' } });
   });
 
 });
