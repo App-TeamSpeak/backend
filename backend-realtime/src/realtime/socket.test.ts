@@ -113,6 +113,8 @@ it.each([null, undefined, 12, 'text', [], {}, { roomId: 2 }, { roomId: ' ' }])('
 it.each([null, undefined, 12, 'text', [], {}, { text: 2 }, { text: ' ' }, { text: 'x'.repeat(2001) }])('handles invalid message payload', async (payload) => {
   const value = await connected(); await value.request('room:join', { roomId: 'room' });
   expect(await value.request('chat:send', payload)).toMatchObject({ ok: false, error: { code: 'MESSAGE_INVALID' } });
+  expect(mocks.persistRoomMessage).not.toHaveBeenCalled();
+  expect(value.received.some(([event]) => event === 'chat:message')).toBe(false);
 });
 it.each(events.slice(3))('relays authorized %s with the verified UID', async (event) => {
   const value = await connected(); const observer = await connected('observer');
@@ -339,6 +341,48 @@ it.each(['ROOM_NOT_FOUND', 'ROOM_ACCESS_DENIED'] as const)('rejects room:join wi
   expect(await value.request('room:join', { roomId: 'blocked' })).toMatchObject({ ok: false, error: { code } });
   expect(io.sockets.adapter.rooms.has('blocked')).toBe(false);
   expect(io.sockets.adapter.rooms.get('existing')?.size).toBe(1);
+});
+
+it('delivers chat only to the active room using the authenticated author', async () => {
+  const sender = await connected('sender');
+  const peer = await connected('peer');
+  const outsider = await connected('outsider');
+  await sender.request('room:join', { roomId: 'room-1' });
+  await peer.request('room:join', { roomId: 'room-1' });
+  await outsider.request('room:join', { roomId: 'room-2' });
+
+  const payload = { text: '  Hola sala  ', uid: 'forged', roomId: 'room-2' };
+  expect(await sender.request('chat:send', payload)).toEqual({ ok: true });
+  const delivered = await peer.wait('chat:message');
+  expect(delivered).toMatchObject({ authorId: 'sender', text: 'Hola sala' });
+  expect(await sender.wait('chat:message')).toEqual(delivered);
+  expect(mocks.persistRoomMessage).toHaveBeenCalledExactlyOnceWith('room-1', 'sender', 'Hola sala');
+
+  // Drain earlier events from the outsider's connection before checking isolation.
+  await outsider.request('room:join', { roomId: 'room-2' });
+  expect(outsider.received.some(([event]) => event === 'chat:message')).toBe(false);
+});
+
+it('rejects a send when the socket changes rooms before authorization completes', async () => {
+  const sender = await connected('sender');
+  await sender.request('room:join', { roomId: 'room-1' });
+
+  let releaseAuthorization!: () => void;
+  const authorization = new Promise<void>(resolve => { releaseAuthorization = resolve; });
+  const started = new Promise<void>(resolve => {
+    mocks.requireActiveAccount.mockImplementationOnce(() => {
+      resolve();
+      return authorization;
+    });
+  });
+
+  const send = sender.request('chat:send', { text: 'Mensaje para la primera sala' });
+  await started;
+  expect(await sender.request('room:join', { roomId: 'room-2' })).toEqual({ ok: true });
+  releaseAuthorization();
+
+  expect(await send).toMatchObject({ ok: false, error: { code: 'ROOM_ACCESS_DENIED' } });
+  expect(mocks.persistRoomMessage).not.toHaveBeenCalled();
 });
 
 it('persists chat:send messages in Firestore before broadcasting and fails closed on persistence error', async () => {
