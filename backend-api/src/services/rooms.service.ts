@@ -1,4 +1,4 @@
-import { Timestamp, type Firestore } from 'firebase-admin/firestore';
+import { Timestamp, type Firestore, type DocumentSnapshot } from 'firebase-admin/firestore';
 import { AppError } from '../middleware/errors';
 import { assertNoAccountDeletion } from './account-state.service';
 import { getFirestoreCollections, getRoomMembersCollection, getRoomMessagesCollection, withFirestore } from './firestore.service';
@@ -42,29 +42,43 @@ export async function createRoom(uid: string, name: string, db?: Firestore) {
   }, db);
 }
 export async function getRoom(uid: string, roomId: string, db?: Firestore) { return withFirestore(async firestore => serialize(await requireRoom(roomId, uid, firestore), firestore), db); }
+function requireOwner(snapshot: DocumentSnapshot<RoomDocument>, uid: string): RoomDocument {
+  const room = snapshot.data();
+  if (!room) throw new AppError(404, 'ROOM_NOT_FOUND', 'La sala no existe.');
+  if (room.ownerId !== uid) throw new AppError(403, 'ROOM_OWNER_REQUIRED', 'Solo el propietario puede gestionar la sala.');
+  return room;
+}
+
 export async function updateRoom(uid: string, roomId: string, name: string, db?: Firestore) {
   return withFirestore(async firestore => {
-    const room = await requireRoom(roomId, uid, firestore);
-    if (room.ownerId !== uid) throw new AppError(403, 'ROOM_OWNER_REQUIRED', 'Solo el propietario puede editar la sala.');
-    const ref = getFirestoreCollections(firestore).rooms.doc(roomId);
-    await ref.update({ name });
-    return serialize({ ...room, name }, firestore);
+    const { rooms, accountDeletions } = getFirestoreCollections(firestore);
+    const ref = rooms.doc(roomId);
+    const room = await firestore.runTransaction(async transaction => {
+      assertNoAccountDeletion(await transaction.get(accountDeletions.doc(uid)));
+      const current = requireOwner(await transaction.get(ref), uid);
+      transaction.update(ref, { name });
+      return { ...current, name };
+    });
+    return serialize(room, firestore);
   }, db);
 }
+
 export async function deleteRoom(uid: string, roomId: string, db?: Firestore) {
   return withFirestore(async firestore => {
-    const room = await requireRoom(roomId, uid, firestore);
-    if (room.ownerId !== uid) throw new AppError(403, 'ROOM_OWNER_REQUIRED', 'Solo el propietario puede eliminar la sala.');
-    const members = await getRoomMembersCollection(roomId, firestore).get();
-    const messages = await getRoomMessagesCollection(roomId, firestore).get();
-    const batch = firestore.batch();
-    batch.delete(getFirestoreCollections(firestore).rooms.doc(roomId));
-    members.docs.forEach(doc => batch.delete(doc.ref));
-    messages.docs.forEach(doc => batch.delete(doc.ref));
-    await batch.commit();
+    const { rooms, accountDeletions } = getFirestoreCollections(firestore);
+    const ref = rooms.doc(roomId);
+    await firestore.runTransaction(async transaction => {
+      assertNoAccountDeletion(await transaction.get(accountDeletions.doc(uid)));
+      requireOwner(await transaction.get(ref), uid);
+      const members = await transaction.get(getRoomMembersCollection(roomId, firestore));
+      const messages = await transaction.get(getRoomMessagesCollection(roomId, firestore));
+      for (const doc of [...members.docs, ...messages.docs]) transaction.delete(doc.ref);
+      transaction.delete(ref);
+    });
     return { roomId };
   }, db);
 }
+
 export async function joinRoom(uid: string, roomId: string, db?: Firestore) {
   return withFirestore(async firestore => {
     const { rooms, accountDeletions } = getFirestoreCollections(firestore);

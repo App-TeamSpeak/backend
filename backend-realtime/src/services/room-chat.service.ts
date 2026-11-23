@@ -52,17 +52,28 @@ export async function persistRoomMessage(
   assertValidId(roomId, 'EVENT_FAILED');
   assertValidId(uid, 'EVENT_FAILED');
   const db = getFirestoreDb();
-  const ref = db.collection('rooms').doc(roomId).collection('messages').doc();
+  const roomRef = db.collection('rooms').doc(roomId);
+  const ref = roomRef.collection('messages').doc();
   const createdAt = Timestamp.now();
   try {
-    await ref.create({
-      messageId: ref.id,
-      roomId,
-      senderId: uid,
-      text,
-      createdAt,
+    await db.runTransaction(async transaction => {
+      const room = await transaction.get(roomRef);
+      if (!room.exists) throw new RoomChatError('ROOM_NOT_FOUND');
+      const ownerId: unknown = room.get('ownerId');
+      if (ownerId !== uid) {
+        const member = await transaction.get(roomRef.collection('members').doc(uid));
+        if (!member.exists) throw new RoomChatError('ROOM_ACCESS_DENIED');
+      }
+      transaction.create(ref, {
+        messageId: ref.id,
+        roomId,
+        senderId: uid,
+        text,
+        createdAt,
+      });
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof RoomChatError) throw error;
     throw new RoomChatError('EVENT_FAILED');
   }
   return {
@@ -83,7 +94,8 @@ export function watchRoomAccess(
     onRevoked('ROOM_ACCESS_DENIED');
     return () => undefined;
   }
-  const db = getFirestoreDb();
+  const roomRef = getFirestoreDb().collection('rooms').doc(roomId);
+  let checkingRoom = false;
   let active = true;
   let roomExists: boolean | undefined;
   let ownerId: unknown;
@@ -105,14 +117,25 @@ export function watchRoomAccess(
       onRevoked('ROOM_NOT_FOUND');
       return;
     }
-    if (roomExists === true && ownerId !== uid && memberExists === false) {
-      stop();
-      onRevoked('ROOM_ACCESS_DENIED');
+    if (roomExists === true && ownerId !== uid && memberExists === false && !checkingRoom) {
+      // Firestore may notify the member listener before the room listener for the same deletion.
+      checkingRoom = true;
+      void withAuthorizationTimeout(() => roomRef.get()).then(snapshot => {
+        checkingRoom = false;
+        if (!active || memberExists !== false || ownerId === uid) return;
+        stop();
+        onRevoked(snapshot.exists ? 'ROOM_ACCESS_DENIED' : 'ROOM_NOT_FOUND');
+      }, () => {
+        checkingRoom = false;
+        if (!active || memberExists !== false || ownerId === uid) return;
+        stop();
+        onError();
+      });
     }
   };
 
   try {
-    stopRoom = db.collection('rooms').doc(roomId).onSnapshot((snapshot) => {
+    stopRoom = roomRef.onSnapshot((snapshot) => {
       if (!active) return;
       roomExists = snapshot.exists;
       ownerId = snapshot.exists ? (snapshot.data() as { ownerId?: unknown } | undefined)?.ownerId : undefined;
@@ -123,7 +146,7 @@ export function watchRoomAccess(
       onError();
     });
 
-    stopMember = db.collection('rooms').doc(roomId).collection('members').doc(uid).onSnapshot((snapshot) => {
+    stopMember = roomRef.collection('members').doc(uid).onSnapshot((snapshot) => {
       if (!active) return;
       memberExists = snapshot.exists;
       evaluate();

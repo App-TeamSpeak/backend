@@ -12,10 +12,17 @@ Gateway Socket.IO para presencia de participantes, chat en tiempo real y señali
 | servidor → cliente | `room:joined` | `{ roomId }` |
 | servidor → cliente | `room:participant-joined` | `{ userId }` |
 | servidor → cliente | `room:participant-left` | `{ userId }` |
+| servidor → cliente | `room:access-revoked` | `{ roomId, code }` |
 | bidireccional | `webrtc:offer`, `webrtc:answer`, `webrtc:ice-candidate` | señal WebRTC |
 | bidireccional | `media:state`, `screen:state` | estado del usuario |
 
 La conexión requiere `socket.handshake.auth.token` con un Firebase ID token. La persistencia del historial queda en `backend-api`.
+
+Cuando se elimina una sala, cada conexión activa en esa sala recibe
+`room:access-revoked` con `{ roomId, code: 'ROOM_NOT_FOUND' }`. El gateway retira
+el socket de la sala y mantiene abierta la conexión. El frontend puede mostrar
+el aviso y volver al dashboard. Si se revoca únicamente la membresía, el código
+es `ROOM_ACCESS_DENIED` y el evento llega solo a la conexión afectada.
 
 ## TS-01.4D.1: infraestructura Firebase propia
 

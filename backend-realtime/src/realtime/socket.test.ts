@@ -369,6 +369,43 @@ it('revokes live access, stops broadcasts, cleans listeners, and avoids duplicat
   expect(observerLeftAfter - observerLeftBefore).toBe(1);
 });
 
+it('notifies every connection in the deleted room and leaves other rooms alone', async () => {
+  const watchers = new Map<string, (code: 'ROOM_NOT_FOUND') => void>();
+  mocks.watchRoomAccess.mockImplementation((_roomId, uid, notify) => {
+    watchers.set(uid, notify);
+    return vi.fn();
+  });
+  const host = await connected('host');
+  const guest = await connected('guest');
+  const unrelated = await connected('unrelated');
+  await host.request('room:join', { roomId: 'deleted' });
+  await guest.request('room:join', { roomId: 'deleted' });
+  await unrelated.request('room:join', { roomId: 'other' });
+
+  watchers.get('host')?.('ROOM_NOT_FOUND');
+  watchers.get('guest')?.('ROOM_NOT_FOUND');
+
+  const notice = { roomId: 'deleted', code: 'ROOM_NOT_FOUND' };
+  expect(await host.wait('room:access-revoked')).toEqual(notice);
+  expect(await guest.wait('room:access-revoked')).toEqual(notice);
+  expect(unrelated.received.some(([event]) => event === 'room:access-revoked')).toBe(false);
+  expect(io.sockets.adapter.rooms.has('deleted')).toBe(false);
+  expect(io.sockets.adapter.rooms.get('other')?.size).toBe(1);
+  expect(io.sockets.sockets.size).toBe(3);
+});
+
+it('revokes access if the room is deleted before the message transaction commits', async () => {
+  const guest = await connected('guest');
+  await guest.request('room:join', { roomId: 'deleted' });
+  mocks.persistRoomMessage.mockRejectedValueOnce(new RoomChatError('ROOM_NOT_FOUND'));
+
+  expect(await guest.request('chat:send', { text: 'Hola' })).toMatchObject({
+    ok: false, error: { code: 'ROOM_NOT_FOUND' },
+  });
+  expect(await guest.wait('room:access-revoked')).toEqual({ roomId: 'deleted', code: 'ROOM_NOT_FOUND' });
+  expect(guest.received.some(([event]) => event === 'chat:message')).toBe(false);
+});
+
 it('blocks chat:send when access is revoked before or during send', async () => {
   const value = await connected('member');
   await value.request('room:join', { roomId: 'room-1' });
