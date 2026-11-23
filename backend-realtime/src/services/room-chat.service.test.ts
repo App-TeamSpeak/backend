@@ -14,14 +14,22 @@ function makeDb(options: {
   memberError?: unknown;
 } = {}) {
   const create = options.create ?? vi.fn().mockResolvedValue(undefined);
+  const room = options.room ?? { exists: true, data: () => ({ ownerId: 'owner-1' }) };
   const db = {
+    runTransaction: async (operation: (transaction: {
+      get: (ref: { get: () => unknown }) => unknown;
+      create: typeof create;
+    }) => Promise<void>) => {
+      await operation({ get: ref => ref.get(), create });
+      await create.mock.results.at(-1)?.value;
+    },
     collection: (name: string) => {
       if (name !== 'rooms') throw new Error(`Unexpected collection: ${name}`);
       return {
         doc: () => ({
           get: options.roomError
             ? vi.fn().mockRejectedValue(options.roomError)
-            : vi.fn().mockResolvedValue(options.room ?? { exists: true, data: () => ({ ownerId: 'owner-1' }) }),
+            : vi.fn().mockResolvedValue({ ...room, get: (field: string) => room.data?.()?.[field] }),
           collection: (sub: string) => {
             if (sub === 'members') {
               return {
@@ -85,7 +93,7 @@ it('persists message in rooms/{roomId}/messages with Firestore schema', async ()
   expect(saved.authorId).toBe('user-1');
   expect(saved.text).toBe('Hola equipo');
   expect(Date.parse(saved.createdAt)).not.toBeNaN();
-  expect(create).toHaveBeenCalledWith(expect.objectContaining({
+  expect(create).toHaveBeenCalledWith(expect.objectContaining({ id: 'msg-123' }), expect.objectContaining({
     messageId: 'msg-123',
     roomId: 'room-1',
     senderId: 'user-1',
@@ -94,13 +102,25 @@ it('persists message in rooms/{roomId}/messages with Firestore schema', async ()
   }));
 });
 
+it('does not persist a message if the room has already been deleted', async () => {
+  const { create } = makeDb({ room: { exists: false } });
+  await expect(persistRoomMessage('room-1', 'user-1', 'Hola')).rejects.toMatchObject({ code: 'ROOM_NOT_FOUND' });
+  expect(create).not.toHaveBeenCalled();
+});
+
+it('does not persist a message if membership has already been revoked', async () => {
+  const { create } = makeDb({ member: { exists: false } });
+  await expect(persistRoomMessage('room-1', 'user-1', 'Hola')).rejects.toMatchObject({ code: 'ROOM_ACCESS_DENIED' });
+  expect(create).not.toHaveBeenCalled();
+});
+
 it('maps message persistence errors to EVENT_FAILED', async () => {
   makeDb({ create: vi.fn().mockRejectedValue(new Error('firestore down')) });
   await expect(persistRoomMessage('room-1', 'user-1', 'Hola')).rejects.toMatchObject({ code: 'EVENT_FAILED' });
 });
 
 describe('watchRoomAccess', () => {
-  function setupSnapshots() {
+  function setupSnapshots(roomExists = true) {
     let roomCb!: (snap: { exists: boolean; data?: () => Record<string, unknown> }) => void;
     let memberCb!: (snap: { exists: boolean }) => void;
     const stopRoom = vi.fn();
@@ -108,6 +128,7 @@ describe('watchRoomAccess', () => {
     const db = {
       collection: () => ({
         doc: () => ({
+          get: vi.fn(async () => ({ exists: roomExists })),
           onSnapshot: (cb: typeof roomCb) => { roomCb = cb; return stopRoom; },
           collection: () => ({
             doc: () => ({
@@ -131,15 +152,26 @@ describe('watchRoomAccess', () => {
     expect(s.stopMember).toHaveBeenCalled();
   });
 
-  it('triggers ROOM_ACCESS_DENIED when non-owner membership is revoked', () => {
+  it('triggers ROOM_ACCESS_DENIED when non-owner membership is revoked', async () => {
     const s = setupSnapshots();
     const onRevoked = vi.fn();
     watchRoomAccess('room-1', 'user-2', onRevoked, vi.fn());
     s.emitRoom({ exists: true, data: () => ({ ownerId: 'owner-1' }) });
     s.emitMember({ exists: false });
-    expect(onRevoked).toHaveBeenCalledExactlyOnceWith('ROOM_ACCESS_DENIED');
+    await vi.waitFor(() => expect(onRevoked).toHaveBeenCalledExactlyOnceWith('ROOM_ACCESS_DENIED'));
     expect(s.stopRoom).toHaveBeenCalled();
     expect(s.stopMember).toHaveBeenCalled();
+  });
+
+  it('reports the room deletion when the member snapshot arrives first', async () => {
+    const s = setupSnapshots(false);
+    const onRevoked = vi.fn();
+    watchRoomAccess('room-1', 'member', onRevoked, vi.fn());
+    s.emitRoom({ exists: true, data: () => ({ ownerId: 'host' }) });
+    s.emitMember({ exists: false });
+    await vi.waitFor(() => expect(onRevoked).toHaveBeenCalledExactlyOnceWith('ROOM_NOT_FOUND'));
+    s.emitRoom({ exists: false });
+    expect(onRevoked).toHaveBeenCalledTimes(1);
   });
 
   it('preserves owner access even when member document is absent', () => {

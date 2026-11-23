@@ -270,7 +270,11 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
         io.to(roomId).emit('chat:message', saved);
         ack?.({ ok: true });
       } catch (error) {
-        report(socket, error instanceof RoomChatError ? error.code : 'EVENT_FAILED', ack);
+        const code = error instanceof RoomChatError ? error.code : 'EVENT_FAILED';
+        if (code === 'ROOM_NOT_FOUND' || code === 'ROOM_ACCESS_DENIED') {
+          revokeRoomAccess(roomId, generation ?? 0, code);
+        }
+        report(socket, code, ack);
       }
     });
     for (const event of ['webrtc:offer', 'webrtc:answer', 'webrtc:ice-candidate', 'media:state', 'screen:state']) {
