@@ -79,7 +79,11 @@ export async function deleteRoom(uid: string, roomId: string, db?: Firestore) {
   }, db);
 }
 
-export async function joinRoom(uid: string, roomId: string, db?: Firestore) {
+export async function joinRoom(uid: string, rawRoomId: string, db?: Firestore) {
+  const roomId = rawRoomId.trim();
+  if (!roomId || roomId.length > 128 || /\/|^\.{1,2}$|^__.*__$/.test(roomId)) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'Ingresa un identificador de sala válido.');
+  }
   return withFirestore(async firestore => {
     const { rooms, accountDeletions } = getFirestoreCollections(firestore);
     const roomRef = rooms.doc(roomId);
@@ -89,7 +93,12 @@ export async function joinRoom(uid: string, roomId: string, db?: Firestore) {
       const room = await transaction.get(roomRef);
       if (!room.exists) throw new AppError(404, 'ROOM_NOT_FOUND', 'La sala no existe.');
       const roomData = room.data() as RoomDocument;
-      transaction.set(memberRef, { uid, roomId, role: roomData.ownerId === uid ? 'host' : 'member', joinedAt: Timestamp.now() }, { merge: true });
+      const member = await transaction.get(memberRef);
+      if (!member.exists) {
+        transaction.create(memberRef, {
+          uid, roomId, role: roomData.ownerId === uid ? 'host' : 'member', joinedAt: Timestamp.now(),
+        });
+      }
       return roomData;
     });
     return serialize(data, firestore);

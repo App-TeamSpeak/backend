@@ -5,7 +5,7 @@ import { createRoom, deleteRoom, getRoom, joinRoom, listRooms, updateRoom } from
 
 type Stored = Record<string, unknown>;
 
-function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: Stored[] } = {}) {
+function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: Stored[]; deletingUid?: string } = {}) {
   const rooms = new Map((initial.rooms ?? []).map(value => [String(value.roomId), value]));
   const members = new Map((initial.members ?? []).map(value => [`${value.roomId}/${value.uid}`, value]));
   const messages = new Map((initial.messages ?? []).map(value => [String(value.messageId), value]));
@@ -25,7 +25,7 @@ function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: St
     };
   };
   const collection = (kind: 'rooms' | 'members' | 'messages' | 'accountDeletions', roomId?: string): any => ({
-    doc: vi.fn((id?: string) => kind === 'accountDeletions' ? { id, get: vi.fn(async () => ({ exists: false, data: () => undefined })) } : ref(kind, id, roomId)),
+    doc: vi.fn((id?: string) => kind === 'accountDeletions' ? { id, get: vi.fn(async () => ({ exists: id === initial.deletingUid, data: () => ({ status: 'pending' }) })) } : ref(kind, id, roomId)),
     where: vi.fn((_field: string, _operator: string, value: unknown) => ({ get: vi.fn(async () => ({ docs: [...rooms.values()].filter(room => room.ownerId === value).map(data => ({ data: () => data })) })) })),
     orderBy: vi.fn(() => ({ limit: vi.fn(() => ({ get: vi.fn(async () => ({ docs: [...messages.values()].sort((a, b) => (a.createdAt as Timestamp).toMillis() - (b.createdAt as Timestamp).toMillis()).map(data => ({ data: () => data })) })) })) })),
     get: vi.fn(async () => {
@@ -90,6 +90,39 @@ describe('rooms and messages services', () => {
     expect([...fake.rooms.values()]).toEqual([room]);
     expect([...fake.members.values()]).toEqual([member]);
     expect([...fake.messages.values()]).toEqual([message]);
+  });
+
+  it('joins a room by its trimmed ID and preserves the original membership on retries', async () => {
+    const fake = database({ rooms: [room] });
+    await expect(joinRoom('guest', '  room-1  ', fake.db)).resolves.toMatchObject({ roomId: 'room-1' });
+    const membership = fake.members.get('room-1/guest');
+    expect(membership).toMatchObject({ uid: 'guest', role: 'member' });
+
+    await joinRoom('guest', 'room-1', fake.db);
+    expect(fake.members.get('room-1/guest')).toBe(membership);
+  });
+
+  it.each(['', '   ', 'nested/room', '.', '..', '__reserved__', 'a'.repeat(129)])(
+    'rejects an invalid room ID before opening a transaction (%j)',
+    async (id) => {
+      const fake = database();
+      await expect(joinRoom('guest', id, fake.db)).rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION_ERROR' });
+      expect(fake.db.runTransaction).not.toHaveBeenCalled();
+    },
+  );
+
+  it('returns 404 for a valid but unknown ID and does not create membership', async () => {
+    const fake = database();
+    await expect(joinRoom('guest', 'missing', fake.db)).rejects.toMatchObject({ statusCode: 404, code: 'ROOM_NOT_FOUND' });
+    expect(fake.members.size).toBe(0);
+  });
+
+  it('does not admit a guest with a pending account deletion', async () => {
+    const fake = database({ rooms: [room], deletingUid: 'guest' });
+    await expect(joinRoom('guest', room.roomId, fake.db)).rejects.toMatchObject({
+      statusCode: 403, code: 'ACCOUNT_DELETION_PENDING',
+    });
+    expect(fake.members.size).toBe(0);
   });
 
   it('lists messages chronologically and creates messages only for members', async () => {
