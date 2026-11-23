@@ -76,11 +76,14 @@ export const openapi = {
       },
       Room: {
         type: 'object',
-        required: ['id', 'name', 'ownerId'],
+        required: ['roomId', 'name', 'ownerId', 'createdAt', 'participants', 'connected'],
         properties: {
-          id: { type: 'string', example: 'room_01HXYZ' },
+          roomId: { type: 'string', example: 'room_01HXYZ' },
           name: { type: 'string', minLength: 1, maxLength: 80, example: 'Algoritmos' },
           ownerId: { type: 'string', example: 'firebase-user-id' },
+          createdAt: { type: 'string', format: 'date-time' },
+          participants: { type: 'integer', minimum: 0 },
+          connected: { type: 'integer', minimum: 0, description: 'Conteo de membresías mantenido por compatibilidad.' },
         },
       },
       Message: {
@@ -263,12 +266,49 @@ export const openapi = {
       get: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Obtiene una sala', responses: {
           409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
           403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' } } },
-      patch: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Edita una sala propia', responses: {
-          409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
-          403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED, sin permisos o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' } } },
-      delete: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Elimina una sala propia', responses: {
-          409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
-          403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED, sin permisos o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' } } },
+      patch: {
+        tags: ['Rooms'],
+        security: [{ bearerAuth: [] }],
+        summary: 'Renombra una sala propia',
+        requestBody: { required: true, content: { 'application/json': {
+          schema: { type: 'object', required: ['name'], properties: {
+            name: { type: 'string', minLength: 1, maxLength: 80, description: 'Se recortan los espacios exteriores.' },
+          } },
+        } } },
+        responses: {
+          200: { description: 'Sala actualizada', content: { 'application/json': { schema: {
+            type: 'object', required: ['success', 'data'], properties: {
+              success: { type: 'boolean', enum: [true] }, data: { $ref: '#/components/schemas/Room' },
+            },
+          } } } },
+          400: { description: 'VALIDATION_ERROR: nombre inválido' },
+          401: { description: 'Se requiere un token Bearer válido' },
+          403: { description: 'ROOM_OWNER_REQUIRED o cuenta sin acceso a recursos privados' },
+          404: { description: 'ROOM_NOT_FOUND' },
+          409: { description: 'PROFILE_INCONSISTENT' },
+          503: { description: 'FIRESTORE_UNAVAILABLE' },
+        },
+      },
+      delete: {
+        tags: ['Rooms'],
+        security: [{ bearerAuth: [] }],
+        summary: 'Elimina una sala propia',
+        description: 'Elimina la sala, sus membresías y sus mensajes. Realtime notifica a las conexiones activas de esa sala mediante room:access-revoked con { roomId, code: "ROOM_NOT_FOUND" }.',
+        responses: {
+          200: { description: 'Sala eliminada', content: { 'application/json': { schema: {
+            type: 'object', required: ['success', 'data'], properties: {
+              success: { type: 'boolean', enum: [true] }, data: {
+                type: 'object', required: ['roomId'], properties: { roomId: { type: 'string' } },
+              },
+            },
+          } } } },
+          401: { description: 'Se requiere un token Bearer válido' },
+          403: { description: 'ROOM_OWNER_REQUIRED o cuenta sin acceso a recursos privados' },
+          404: { description: 'ROOM_NOT_FOUND' },
+          409: { description: 'PROFILE_INCONSISTENT' },
+          503: { description: 'FIRESTORE_UNAVAILABLE' },
+        },
+      },
     },
     '/api/rooms/{roomId}/join': {
       post: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Se une a una sala', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: {

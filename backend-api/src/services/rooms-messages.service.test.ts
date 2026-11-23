@@ -29,24 +29,19 @@ function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: St
     where: vi.fn((_field: string, _operator: string, value: unknown) => ({ get: vi.fn(async () => ({ docs: [...rooms.values()].filter(room => room.ownerId === value).map(data => ({ data: () => data })) })) })),
     orderBy: vi.fn(() => ({ limit: vi.fn(() => ({ get: vi.fn(async () => ({ docs: [...messages.values()].sort((a, b) => (a.createdAt as Timestamp).toMillis() - (b.createdAt as Timestamp).toMillis()).map(data => ({ data: () => data })) })) })) })),
     get: vi.fn(async () => {
-      const values = kind === 'rooms' ? [...rooms.values()] : kind === 'members' ? [...members.entries()].filter(([key]) => key.startsWith(`${roomId}/`)).map(([, value]) => value) : [...messages.values()];
+      const values = kind === 'rooms' ? [...rooms.values()] : kind === 'members' ? [...members.entries()].filter(([key]) => key.startsWith(`${roomId}/`)).map(([, value]) => value) : [...messages.values()].filter(message => message.roomId === roomId);
       return { docs: values.map(data => ({ ref: ref(kind === 'accountDeletions' ? 'rooms' : kind, String(data.messageId ?? data.uid ?? data.roomId), roomId), data: () => data })), size: kind === 'rooms' ? rooms.size : kind === 'members' ? [...members.keys()].filter(key => key.startsWith(`${roomId}/`)).length : messages.size };
     }),
   });
-  const batch = {
-    delete: vi.fn((value: { id?: string }) => {
-      if (value.id) { rooms.delete(value.id); messages.delete(value.id); }
-    }),
-    commit: vi.fn(async () => undefined),
-  };
   const db = {
     collection: vi.fn((name: string) => collection(name === 'rooms' ? 'rooms' : name === 'members' ? 'members' : name === 'accountDeletions' ? 'accountDeletions' : 'messages')),
     runTransaction: vi.fn(async (callback: (transaction: any) => unknown) => callback({
       get: vi.fn(async (value: any) => value.get()),
+      update: vi.fn((value: any, data: Stored) => value.update(data)),
+      delete: vi.fn((value: any) => value.delete()),
       create: vi.fn(async (value: any, data: Stored) => value.create(data)),
       set: vi.fn(async (value: any, data: Stored, opts?: { merge?: boolean }) => value.set(data, opts)),
     })),
-    batch: vi.fn(() => batch),
   } as unknown as Firestore;
   return { db, rooms, members, messages };
 }
@@ -77,6 +72,24 @@ describe('rooms and messages services', () => {
     await expect(listRooms('owner', fake.db)).resolves.toHaveLength(1);
     await expect(deleteRoom('owner', 'room-1', fake.db)).resolves.toEqual({ roomId: 'room-1' });
     expect(fake.rooms.has('room-1')).toBe(false);
+    expect(fake.members.size).toBe(0);
+    expect(fake.messages.size).toBe(0);
+    await expect(listRooms('owner', fake.db)).resolves.toEqual([]);
+    await expect(deleteRoom('owner', 'room-1', fake.db)).rejects.toMatchObject({ statusCode: 404, code: 'ROOM_NOT_FOUND' });
+    await expect(updateRoom('owner', 'room-1', 'Otra sala', fake.db)).rejects.toMatchObject({ statusCode: 404, code: 'ROOM_NOT_FOUND' });
+  });
+
+  it.each(['member', 'stranger'])('returns 403 and preserves room data for %s', async (uid) => {
+    const member = { roomId: room.roomId, uid: 'member' };
+    const message = { messageId: 'message-1', roomId: room.roomId };
+    const fake = database({ rooms: [room], members: [member], messages: [message] });
+    const forbidden = { statusCode: 403, code: 'ROOM_OWNER_REQUIRED' };
+
+    await expect(updateRoom(uid, room.roomId, 'No permitido', fake.db)).rejects.toMatchObject(forbidden);
+    await expect(deleteRoom(uid, room.roomId, fake.db)).rejects.toMatchObject(forbidden);
+    expect([...fake.rooms.values()]).toEqual([room]);
+    expect([...fake.members.values()]).toEqual([member]);
+    expect([...fake.messages.values()]).toEqual([message]);
   });
 
   it('lists messages chronologically and creates messages only for members', async () => {
