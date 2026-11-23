@@ -14,7 +14,7 @@ function makeDb(options: {
   memberError?: unknown;
 } = {}) {
   const create = options.create ?? vi.fn().mockResolvedValue(undefined);
-  const room = options.room ?? { exists: true, data: () => ({ ownerId: 'owner-1' }) };
+  const room: NonNullable<typeof options.room> = options.room ?? { exists: true, data: () => ({ ownerId: 'owner-1' }) };
   const db = {
     runTransaction: async (operation: (transaction: {
       get: (ref: { get: () => unknown }) => unknown;
