@@ -7,7 +7,7 @@ import type { RoomDocument } from './firestore.documents';
 async function memberSnapshot(roomId: string, uid: string, db: Firestore) {
   return getRoomMembersCollection(roomId, db).doc(uid).get();
 }
-async function requireRoom(roomId: string, uid: string, db: Firestore) {
+export async function requireRoom(roomId: string, uid: string, db: Firestore) {
   const room = await getFirestoreCollections(db).rooms.doc(roomId).get();
   if (!room.exists) throw new AppError(404, 'ROOM_NOT_FOUND', 'La sala no existe.');
   const data = room.data() as RoomDocument;

@@ -346,9 +346,49 @@ export const openapi = {
       },
     },
     '/api/rooms/{roomId}/messages': {
-      get: { tags: ['Messages'], security: [{ bearerAuth: [] }], summary: 'Obtiene el historial de chat', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: {
-          409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
-          403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada; Firestore pendiente' } } },
+      get: {
+        tags: ['Messages'],
+        security: [{ bearerAuth: [] }],
+        summary: 'Obtiene una página del historial de chat',
+        description: 'Para el propietario o un miembro. Sin cursor, devuelve los últimos mensajes. Cada página se entrega del más antiguo al más reciente. Envía nextCursor como cursor para consultar la página anterior.',
+        parameters: [
+          { name: 'roomId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Cursor opaco obtenido en la página anterior.' },
+        ],
+        responses: {
+          ...roomAccessErrors,
+          200: {
+            description: 'Página de mensajes. data está vacío si no hay mensajes. nextCursor es null si no quedan mensajes anteriores.',
+            content: { 'application/json': { schema: {
+              type: 'object',
+              required: ['success', 'data', 'pagination'],
+              properties: {
+                success: { type: 'boolean', enum: [true] },
+                data: { type: 'array', items: {
+                  type: 'object',
+                  required: ['messageId', 'roomId', 'senderId', 'text', 'createdAt'],
+                  properties: {
+                    messageId: { type: 'string' },
+                    roomId: { type: 'string' },
+                    senderId: { type: 'string', nullable: true },
+                    authorDeleted: { type: 'boolean' },
+                    text: { type: 'string' },
+                    createdAt: { type: 'string', format: 'date-time' },
+                  },
+                } },
+                pagination: {
+                  type: 'object', required: ['nextCursor'],
+                  properties: { nextCursor: { type: 'string', nullable: true } },
+                },
+              },
+            } } },
+          },
+          400: { description: 'VALIDATION_ERROR: límite o cursor inválido' },
+          403: { description: 'ROOM_ACCESS_DENIED o cuenta sin acceso a recursos privados' },
+          404: { description: 'ROOM_NOT_FOUND: la sala no existe' },
+        },
+      },
       post: { tags: ['Messages'], security: [{ bearerAuth: [] }], summary: 'Guarda un mensaje', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: {
           409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
           403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada; Firestore pendiente' } } },
