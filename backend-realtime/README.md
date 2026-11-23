@@ -9,6 +9,7 @@ Gateway Socket.IO para presencia de participantes, chat en tiempo real y señali
 | cliente → servidor | `room:join` | `{ roomId }` |
 | cliente → servidor | `room:leave` | — |
 | cliente → servidor | `chat:send` | `{ text }` |
+| servidor → cliente | `chat:message` | `{ messageId, authorId, text, createdAt }` |
 | servidor → cliente | `room:joined` | `{ roomId, participants }` |
 | servidor → cliente | `room:participant-joined` | `{ userId }` |
 | servidor → cliente | `room:participant-left` | `{ userId }` |
@@ -16,7 +17,14 @@ Gateway Socket.IO para presencia de participantes, chat en tiempo real y señali
 | bidireccional | `webrtc:offer`, `webrtc:answer`, `webrtc:ice-candidate` | señal WebRTC |
 | bidireccional | `media:state`, `screen:state` | estado del usuario |
 
-La conexión requiere `socket.handshake.auth.token` con un Firebase ID token. La persistencia del historial queda en `backend-api`.
+La conexión requiere `socket.handshake.auth.token` con un Firebase ID token.
+
+`chat:send` recorta los espacios exteriores de `text` y admite entre 1 y 2000
+caracteres después del recorte. El servidor toma el autor del token validado y
+el destino de la sala activa del socket. Si la sala cambia durante la
+autorización, rechaza el envío. Tras guardar el mensaje en Firestore, emite
+`chat:message` a la sala, incluido el remitente. El historial se consulta en
+`GET /api/rooms/{roomId}/messages` de `backend-api`.
 
 Para unirse por ID o enlace directo, el cliente autenticado llama primero a
 `POST /api/rooms/{roomId}/join`. Tras el 200, emite `room:join` con el ID de

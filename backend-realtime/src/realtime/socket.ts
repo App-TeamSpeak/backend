@@ -103,8 +103,9 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
     let blocked = false;
     // One wrapper covers every application handler, including room:leave.
     // Internal disconnect cleanup never passes through this authorization gate.
-    function protect(event: string, handler: (payload: unknown, allowed: () => boolean, ack?: Ack) => void | Promise<void>) {
+    function protect(event: string, handler: (payload: unknown, allowed: () => boolean, ack: Ack | undefined, receivedRoomGeneration: number | undefined) => void | Promise<void>) {
       socket.on(event, (...args: unknown[]) => {
+        const receivedRoomGeneration = socket.data.roomGeneration as number | undefined;
         const last = args[args.length - 1];
         const ack = typeof last === 'function' ? last as Ack : undefined;
         const allowed = () => socket.connected && !blocked && !stopping && !socket.data.accountAccessBlocked;
@@ -137,7 +138,7 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
           }
           // Other concurrently authorizing events may already have detected a marker.
           if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
-          await handler(args[0], allowed, ack);
+          await handler(args[0], allowed, ack, receivedRoomGeneration);
         })().catch(() => { report(socket, 'EVENT_FAILED', ack); }).finally(() => {
           eventFinished = true; release();
         });
@@ -243,7 +244,12 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       try { if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; } await leaveRoom(socket, detachRoomWatcher); ack?.({ ok: true }); }
       finally { release(); }
     });
-    protect('chat:send', async (payload, allowed, ack) => {
+    protect('chat:send', async (payload, allowed, ack, receivedRoomGeneration) => {
+      // Bind the send to the room active when the event arrived, before authorization.
+      if (socket.data.roomGeneration !== receivedRoomGeneration) {
+        report(socket, 'ROOM_ACCESS_DENIED', ack);
+        return;
+      }
       const value = field(payload, 'text');
       const message = typeof value === 'string' ? value.trim() : '';
       const roomId = socket.data.roomId as string | undefined;
