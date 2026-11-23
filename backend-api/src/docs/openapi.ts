@@ -17,6 +17,25 @@ const userProfileSchema = {
         },
       } as const;
 
+const roomResponseContent = {
+  'application/json': {
+    schema: {
+      type: 'object',
+      required: ['success', 'data'],
+      properties: {
+        success: { type: 'boolean', enum: [true] },
+        data: { $ref: '#/components/schemas/Room' },
+      },
+    },
+  },
+} as const;
+
+const roomAccessErrors = {
+  401: { description: 'Se requiere un token Bearer válido' },
+  409: { description: 'PROFILE_INCONSISTENT' },
+  503: { description: 'FIRESTORE_UNAVAILABLE' },
+} as const;
+
 export const openapi = {
   openapi: '3.0.3',
   info: {
@@ -276,17 +295,12 @@ export const openapi = {
           } },
         } } },
         responses: {
-          200: { description: 'Sala actualizada', content: { 'application/json': { schema: {
-            type: 'object', required: ['success', 'data'], properties: {
-              success: { type: 'boolean', enum: [true] }, data: { $ref: '#/components/schemas/Room' },
-            },
-          } } } },
+          ...roomAccessErrors,
+          200: { description: 'Sala actualizada', content: roomResponseContent },
           400: { description: 'VALIDATION_ERROR: nombre inválido' },
-          401: { description: 'Se requiere un token Bearer válido' },
           403: { description: 'ROOM_OWNER_REQUIRED o cuenta sin acceso a recursos privados' },
           404: { description: 'ROOM_NOT_FOUND' },
-          409: { description: 'PROFILE_INCONSISTENT' },
-          503: { description: 'FIRESTORE_UNAVAILABLE' },
+
         },
       },
       delete: {
@@ -322,17 +336,12 @@ export const openapi = {
           schema: { type: 'string', minLength: 1, maxLength: 128 },
         }],
         responses: {
-          200: { description: 'Membresía disponible', content: { 'application/json': { schema: {
-            type: 'object', required: ['success', 'data'], properties: {
-              success: { type: 'boolean', enum: [true] }, data: { $ref: '#/components/schemas/Room' },
-            },
-          } } } },
+          ...roomAccessErrors,
+          200: { description: 'Membresía disponible', content: roomResponseContent },
           400: { description: 'VALIDATION_ERROR: identificador inválido' },
-          401: { description: 'Se requiere un token Bearer válido' },
           403: { description: 'La cuenta no cumple los requisitos de acceso' },
           404: { description: 'ROOM_NOT_FOUND: la sala no existe' },
-          409: { description: 'PROFILE_INCONSISTENT' },
-          503: { description: 'FIRESTORE_UNAVAILABLE' },
+
         },
       },
     },
