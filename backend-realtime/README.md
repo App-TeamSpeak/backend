@@ -9,7 +9,7 @@ Gateway Socket.IO para presencia de participantes, chat en tiempo real y señali
 | cliente → servidor | `room:join` | `{ roomId }` |
 | cliente → servidor | `room:leave` | — |
 | cliente → servidor | `chat:send` | `{ text }` |
-| servidor → cliente | `room:joined` | `{ roomId }` |
+| servidor → cliente | `room:joined` | `{ roomId, participants }` |
 | servidor → cliente | `room:participant-joined` | `{ userId }` |
 | servidor → cliente | `room:participant-left` | `{ userId }` |
 | servidor → cliente | `room:access-revoked` | `{ roomId, code }` |
@@ -17,6 +17,17 @@ Gateway Socket.IO para presencia de participantes, chat en tiempo real y señali
 | bidireccional | `media:state`, `screen:state` | estado del usuario |
 
 La conexión requiere `socket.handshake.auth.token` con un Firebase ID token. La persistencia del historial queda en `backend-api`.
+
+Para unirse por ID o enlace directo, el cliente autenticado llama primero a
+`POST /api/rooms/{roomId}/join`. Tras el 200, emite `room:join` con el ID de
+la respuesta. Realtime comprueba que la sala exista y que el usuario sea el
+propietario o tenga membresía. Si se reconecta, el cliente vuelve a emitir
+`room:join` para recuperar la presencia.
+
+`room:joined` se envía al socket solicitante con los UID únicos presentes.
+Las demás conexiones de la sala reciben `room:participant-joined` con el primer
+socket de cada usuario y `room:participant-left` al salir el último. Un ID vacío
+produce `ROOM_ID_REQUIRED` y un ID mal formado, `ROOM_ID_INVALID`.
 
 Cuando se elimina una sala, cada conexión activa en esa sala recibe
 `room:access-revoked` con `{ roomId, code: 'ROOM_NOT_FOUND' }`. El gateway retira

@@ -305,6 +305,33 @@ it.each(['PROFILE_INCOMPLETE', 'PROFILE_INCONSISTENT', 'AUTHORIZATION_UNAVAILABL
   expect(mocks.watchAccountDeletion).not.toHaveBeenCalled(); expect(io.sockets.sockets.size).toBe(0);
 });
 
+it.each(['nested/room', '.', '..', '__reserved__', 'a'.repeat(129)])('rejects invalid room IDs before checking Firestore (%j)', async (roomId) => {
+  const guest = await connected('guest');
+  expect(await guest.request('room:join', { roomId })).toMatchObject({ ok: false, error: { code: 'ROOM_ID_INVALID' } });
+  expect(mocks.ensureRoomAccessible).not.toHaveBeenCalled();
+});
+
+it('tracks one participant across two connections and announces the last departure', async () => {
+  const observer = await connected('observer');
+  const first = await connected('guest');
+  const second = await connected('guest');
+  await observer.request('room:join', { roomId: 'presence' });
+  await first.request('room:join', { roomId: '  presence  ' });
+  expect(await observer.wait('room:participant-joined')).toEqual({ userId: 'guest' });
+  expect(mocks.ensureRoomAccessible).toHaveBeenCalledWith('presence', 'guest');
+
+  await second.request('room:join', { roomId: 'presence' });
+  expect(await second.wait('room:joined')).toEqual({ roomId: 'presence', participants: ['observer', 'guest'] });
+  await first.request('room:leave', {});
+  // An acknowledgement to the observer flushes earlier events on its connection.
+  await observer.request('room:join', { roomId: 'presence' });
+  expect(observer.received.filter(([event]) => event === 'room:participant-joined')).toHaveLength(1);
+  expect(observer.received.filter(([event]) => event === 'room:participant-left')).toHaveLength(0);
+
+  await second.close();
+  expect(await observer.wait('room:participant-left')).toEqual({ userId: 'guest' });
+});
+
 it.each(['ROOM_NOT_FOUND', 'ROOM_ACCESS_DENIED'] as const)('rejects room:join with %s without joining or leaving current room', async (code) => {
   const value = await connected();
   await value.request('room:join', { roomId: 'existing' });

@@ -28,6 +28,7 @@ const messages = {
   ACCOUNT_UNAVAILABLE: 'La cuenta no puede realizar esta operación.',
   AUTHORIZATION_UNAVAILABLE: 'No se pudo comprobar la autorización.',
   ROOM_ID_REQUIRED: 'roomId es obligatorio.',
+  ROOM_ID_INVALID: 'Ingresa un identificador de sala válido.',
   ROOM_NOT_FOUND: 'La sala no existe.',
   ROOM_ACCESS_DENIED: 'No tienes acceso a esta sala.',
   MESSAGE_INVALID: 'El mensaje no es válido.',
@@ -161,7 +162,7 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
         finally {
           if (socket.connected) {
             socket.emit('room:access-revoked', { roomId: expectedRoomId, code });
-            socket.to(expectedRoomId).emit('room:participant-left', { userId: socket.data.user.uid });
+            notifyParticipantLeft(socket, expectedRoomId);
           }
         }
       })();
@@ -186,6 +187,10 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       const value = field(payload, 'roomId');
       const roomId = typeof value === 'string' ? value.trim() : '';
       if (!roomId) { report(socket, 'ROOM_ID_REQUIRED', ack); return; }
+      if (roomId.length > 128 || /\/|^\.{1,2}$|^__.*__$/.test(roomId)) {
+        report(socket, 'ROOM_ID_INVALID', ack);
+        return;
+      }
       // Serialize room transitions; asynchronous adapters must not leave old memberships.
       const previous = transitions;
       let release!: () => void;
@@ -209,10 +214,7 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
           if (!socket.data.roomWatcher) {
             attachRoomWatcher(roomId, (socket.data.roomGeneration as number | undefined) ?? 0);
           }
-          const participants = Array.from(io.sockets.adapter.rooms.get(roomId) ?? [])
-            .map(socketId => io.sockets.sockets.get(socketId)?.data.user?.uid)
-            .filter((uid): uid is string => Boolean(uid));
-          socket.emit('room:joined', { roomId, participants });
+          socket.emit('room:joined', { roomId, participants: roomParticipants(socket, roomId) });
           ack?.({ ok: true });
           return;
         }
@@ -224,11 +226,11 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
         socket.data.roomId = roomId;
         socket.data.roomGeneration = generation;
         attachRoomWatcher(roomId, generation);
-        socket.to(roomId).emit('room:participant-joined', { userId: socket.data.user.uid });
-        const participants = Array.from(io.sockets.adapter.rooms.get(roomId) ?? [])
-          .map(socketId => io.sockets.sockets.get(socketId)?.data.user?.uid)
-          .filter((uid): uid is string => Boolean(uid));
-        socket.emit('room:joined', { roomId, participants });
+        if (socket.data.roomId !== roomId || socket.data.roomGeneration !== generation) {
+          report(socket, 'ROOM_ACCESS_DENIED', ack);
+          return;
+        }
+        announceParticipant(socket, roomId);
         ack?.({ ok: true });
       } finally { release(); }
     });
@@ -293,11 +295,40 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       socket.data.roomGeneration = ((socket.data.roomGeneration as number | undefined) ?? 0) + 1;
       delete socket.data.roomId;
       detachRoomWatcher();
-      if (roomId) socket.to(roomId).emit('room:participant-left', { userId: socket.data.user.uid });
+      if (roomId) notifyParticipantLeft(socket, roomId);
     });
   });
   return io;
 }
+function roomParticipants(socket: Socket, roomId: string, excludeSocketId?: string): string[] {
+  const participants = new Set<string>();
+  for (const id of socket.nsp.adapter.rooms.get(roomId) ?? []) {
+    if (id === excludeSocketId) continue;
+    const data = socket.nsp.sockets.get(id)?.data;
+    if (data?.roomId === roomId && typeof data.user?.uid === 'string') {
+      participants.add(data.user.uid);
+    }
+  }
+  return [...participants];
+}
+
+function announceParticipant(socket: Socket, roomId: string): void {
+  const userId = socket.data.user.uid as string;
+  const participants = roomParticipants(socket, roomId, socket.id);
+  if (!participants.includes(userId)) {
+    participants.push(userId);
+    socket.to(roomId).emit('room:participant-joined', { userId });
+  }
+  socket.emit('room:joined', { roomId, participants });
+}
+
+function notifyParticipantLeft(socket: Socket, roomId: string): void {
+  const userId = socket.data.user.uid as string;
+  if (!roomParticipants(socket, roomId, socket.id).includes(userId)) {
+    socket.to(roomId).emit('room:participant-left', { userId });
+  }
+}
+
 async function leaveRoom(socket: Socket, detachWatcher?: () => void): Promise<void> {
   const roomId = socket.data.roomId as string | undefined;
   socket.data.roomGeneration = ((socket.data.roomGeneration as number | undefined) ?? 0) + 1;
@@ -306,5 +337,5 @@ async function leaveRoom(socket: Socket, detachWatcher?: () => void): Promise<vo
   delete socket.data.roomId;
   await socket.leave(roomId);
   // No protected action may resume after a disconnect. Cleanup itself is unconditional.
-  if (socket.connected) socket.to(roomId).emit('room:participant-left', { userId: socket.data.user.uid });
+  if (socket.connected) notifyParticipantLeft(socket, roomId);
 }
