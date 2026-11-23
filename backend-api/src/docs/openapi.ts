@@ -17,6 +17,25 @@ const userProfileSchema = {
         },
       } as const;
 
+const roomResponseContent = {
+  'application/json': {
+    schema: {
+      type: 'object',
+      required: ['success', 'data'],
+      properties: {
+        success: { type: 'boolean', enum: [true] },
+        data: { $ref: '#/components/schemas/Room' },
+      },
+    },
+  },
+} as const;
+
+const roomAccessErrors = {
+  401: { description: 'Se requiere un token Bearer válido' },
+  409: { description: 'PROFILE_INCONSISTENT' },
+  503: { description: 'FIRESTORE_UNAVAILABLE' },
+} as const;
+
 export const openapi = {
   openapi: '3.0.3',
   info: {
@@ -276,17 +295,12 @@ export const openapi = {
           } },
         } } },
         responses: {
-          200: { description: 'Sala actualizada', content: { 'application/json': { schema: {
-            type: 'object', required: ['success', 'data'], properties: {
-              success: { type: 'boolean', enum: [true] }, data: { $ref: '#/components/schemas/Room' },
-            },
-          } } } },
+          ...roomAccessErrors,
+          200: { description: 'Sala actualizada', content: roomResponseContent },
           400: { description: 'VALIDATION_ERROR: nombre inválido' },
-          401: { description: 'Se requiere un token Bearer válido' },
           403: { description: 'ROOM_OWNER_REQUIRED o cuenta sin acceso a recursos privados' },
           404: { description: 'ROOM_NOT_FOUND' },
-          409: { description: 'PROFILE_INCONSISTENT' },
-          503: { description: 'FIRESTORE_UNAVAILABLE' },
+
         },
       },
       delete: {
@@ -311,9 +325,25 @@ export const openapi = {
       },
     },
     '/api/rooms/{roomId}/join': {
-      post: { tags: ['Rooms'], security: [{ bearerAuth: [] }], summary: 'Se une a una sala', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: {
-          409: { description: 'PROFILE_INCONSISTENT' }, 503: { description: 'FIRESTORE_UNAVAILABLE' },
-          403: { description: 'PROFILE_INCOMPLETE, EMAIL_NOT_VERIFIED o ACCOUNT_DELETION_PENDING, ACCOUNT_DELETION_BLOCKED o ACCOUNT_DELETED: la cuenta no puede acceder a recursos privados.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } }, 501: { description: 'Ruta preparada' }, 404: { description: 'Sala no encontrada' } } },
+      post: {
+        tags: ['Rooms'],
+        security: [{ bearerAuth: [] }],
+        summary: 'Registra el acceso a una sala por su ID',
+        description: 'Requiere una cuenta activa, correo verificado y perfil completo. Crea la membresía si falta. Después, el cliente inicia presencia con room:join en Realtime.',
+        parameters: [{
+          name: 'roomId', in: 'path', required: true,
+          description: 'Se recortan los espacios exteriores antes de validar.',
+          schema: { type: 'string', minLength: 1, maxLength: 128 },
+        }],
+        responses: {
+          ...roomAccessErrors,
+          200: { description: 'Membresía disponible', content: roomResponseContent },
+          400: { description: 'VALIDATION_ERROR: identificador inválido' },
+          403: { description: 'La cuenta no cumple los requisitos de acceso' },
+          404: { description: 'ROOM_NOT_FOUND: la sala no existe' },
+
+        },
+      },
     },
     '/api/rooms/{roomId}/messages': {
       get: { tags: ['Messages'], security: [{ bearerAuth: [] }], summary: 'Obtiene el historial de chat', parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string' } }], responses: {
