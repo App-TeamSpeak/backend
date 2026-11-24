@@ -84,8 +84,9 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       }
       await requireActiveAccount(user.uid);
       if (user.email_verified !== true) { deny('EMAIL_NOT_VERIFIED'); return; }
-      await requireCompleteProfile(user.uid);
+      const profile = await requireCompleteProfile(user.uid);
       socket.data.user = user;
+      socket.data.authorName = profile?.authorName ?? null;
       await access.attach(user.uid, {
         block: (code) => { socket.data.accountAccessBlocked = true; socket.data.accountAccessCode = code; },
         disconnect: () => { if (socket.connected) { socket.emit('error:message', { code: socket.data.accountAccessCode, message: 'La sesión ya no está autorizada.' }); socket.disconnect(true); } },
@@ -215,7 +216,7 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
           if (!socket.data.roomWatcher) {
             attachRoomWatcher(roomId, (socket.data.roomGeneration as number | undefined) ?? 0);
           }
-          socket.emit('room:joined', { roomId, participants: roomParticipants(socket, roomId) });
+          socket.emit('room:joined', { roomId, ...roomParticipantDirectory(socket, roomId) });
           ack?.({ ok: true });
           return;
         }
@@ -275,7 +276,10 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
           report(socket, 'ROOM_ACCESS_DENIED', ack);
           return;
         }
-        io.to(roomId).emit('chat:message', saved);
+        io.to(roomId).emit('chat:message', {
+          ...saved,
+          authorName: (socket.data.authorName as string | null | undefined) ?? null,
+        });
         ack?.({ ok: true });
       } catch (error) {
         const code = error instanceof RoomChatError ? error.code : 'EVENT_FAILED';
@@ -306,31 +310,46 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
   });
   return io;
 }
-function roomParticipants(socket: Socket, roomId: string, excludeSocketId?: string): string[] {
-  const participants = new Set<string>();
+function roomParticipantDirectory(
+  socket: Socket,
+  roomId: string,
+  excludeSocketId?: string,
+): { participants: string[]; participantNames: Record<string, string | null> } {
+  const participants: string[] = [];
+  const participantNames: Record<string, string | null> = {};
+  const seen = new Set<string>();
   for (const id of socket.nsp.adapter.rooms.get(roomId) ?? []) {
     if (id === excludeSocketId) continue;
     const data = socket.nsp.sockets.get(id)?.data;
-    if (data?.roomId === roomId && typeof data.user?.uid === 'string') {
-      participants.add(data.user.uid);
+    const uid = data?.user?.uid;
+    if (data?.roomId === roomId && typeof uid === 'string') {
+      if (!seen.has(uid)) {
+        seen.add(uid);
+        participants.push(uid);
+        participantNames[uid] = (data.authorName as string | null | undefined) ?? null;
+      } else if (participantNames[uid] === null && typeof data.authorName === 'string' && data.authorName.trim()) {
+        participantNames[uid] = data.authorName;
+      }
     }
   }
-  return [...participants];
+  return { participants, participantNames };
 }
 
 function announceParticipant(socket: Socket, roomId: string): void {
   const userId = socket.data.user.uid as string;
-  const participants = roomParticipants(socket, roomId, socket.id);
+  const authorName = (socket.data.authorName as string | null | undefined) ?? null;
+  const { participants, participantNames } = roomParticipantDirectory(socket, roomId, socket.id);
   if (!participants.includes(userId)) {
     participants.push(userId);
-    socket.to(roomId).emit('room:participant-joined', { userId });
+    participantNames[userId] = authorName;
+    socket.to(roomId).emit('room:participant-joined', { userId, authorName });
   }
-  socket.emit('room:joined', { roomId, participants });
+  socket.emit('room:joined', { roomId, participants, participantNames });
 }
 
 function notifyParticipantLeft(socket: Socket, roomId: string): void {
   const userId = socket.data.user.uid as string;
-  if (!roomParticipants(socket, roomId, socket.id).includes(userId)) {
+  if (!roomParticipantDirectory(socket, roomId, socket.id).participants.includes(userId)) {
     socket.to(roomId).emit('room:participant-left', { userId });
   }
 }

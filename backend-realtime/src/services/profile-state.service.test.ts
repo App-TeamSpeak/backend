@@ -7,7 +7,13 @@ const full = () => ({ uid: 'trusted', email: 'fixture@example.com', nombre: 'Ana
 beforeEach(() => vi.resetAllMocks());
 afterEach(() => vi.useRealTimers());
 it('accepts authoritative complete data for the authenticated UID', async () => {
-  mocks.read.mockResolvedValue(full()); await expect(requireCompleteProfile('trusted')).resolves.toBeUndefined(); expect(mocks.read).toHaveBeenCalledExactlyOnceWith('trusted');
+  mocks.read.mockResolvedValue(full());
+  await expect(requireCompleteProfile('trusted')).resolves.toEqual({
+    nombre: 'Ana',
+    apellido: 'Pérez',
+    authorName: 'Ana Pérez',
+  });
+  expect(mocks.read).toHaveBeenCalledExactlyOnceWith('trusted');
 });
 it.each([undefined, {}, { uid: 'trusted', profileStatus: 'incomplete' }, { uid: 'trusted', profileStatus: 'complete' }])('denies absent or partial persisted profile %j', async value => {
   mocks.read.mockResolvedValue(value); await expect(requireCompleteProfile('trusted')).rejects.toMatchObject({ code: 'PROFILE_INCOMPLETE' });
