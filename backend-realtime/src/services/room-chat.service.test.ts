@@ -4,55 +4,71 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ getFirestoreDb: vi.fn() }));
 vi.mock('../config/firebase', () => ({ getFirestoreDb: mocks.getFirestoreDb }));
 
-import { ensureRoomAccessible, persistRoomMessage, RoomChatError, watchRoomAccess } from './room-chat.service';
+import { ensureRoomAccessible, persistRoomMessage, RoomChatError, syncRoomPresence, watchRoomAccess } from './room-chat.service';
 
 function makeDb(options: {
   room?: { exists: boolean; data?: () => Record<string, unknown> };
   member?: { exists: boolean };
   create?: ReturnType<typeof vi.fn>;
+  update?: ReturnType<typeof vi.fn>;
+  set?: ReturnType<typeof vi.fn>;
+  del?: ReturnType<typeof vi.fn>;
   roomError?: unknown;
   memberError?: unknown;
 } = {}) {
   const create = options.create ?? vi.fn().mockResolvedValue(undefined);
+  const update = options.update ?? vi.fn().mockResolvedValue(undefined);
+  const set = options.set ?? vi.fn().mockResolvedValue(undefined);
+  const del = options.del ?? vi.fn().mockResolvedValue(undefined);
   const room: NonNullable<typeof options.room> = options.room ?? { exists: true, data: () => ({ ownerId: 'owner-1' }) };
+  const roomRef = {
+    id: 'room-1',
+    get: options.roomError
+      ? vi.fn().mockRejectedValue(options.roomError)
+      : vi.fn().mockResolvedValue({ ...room, get: (field: string) => room.data?.()?.[field] }),
+    update,
+    collection: (sub: string) => {
+      if (sub === 'members') {
+        return {
+          doc: () => ({
+            get: options.memberError
+              ? vi.fn().mockRejectedValue(options.memberError)
+              : vi.fn().mockResolvedValue(options.member ?? { exists: true }),
+          }),
+        };
+      }
+      if (sub === 'messages') {
+        return {
+          doc: () => ({ id: 'msg-123', create }),
+        };
+      }
+      if (sub === 'presence') {
+        return {
+          doc: (uid: string) => ({ id: uid, set, delete: del }),
+        };
+      }
+      throw new Error(`Unexpected subcollection: ${sub}`);
+    },
+  };
   const db = {
     runTransaction: async (operation: (transaction: {
       get: (ref: { get: () => unknown }) => unknown;
       create: typeof create;
+      update: typeof update;
+      set: typeof set;
     }) => Promise<void>) => {
-      await operation({ get: ref => ref.get(), create });
+      await operation({ get: ref => ref.get(), create, update, set });
       await create.mock.results.at(-1)?.value;
     },
     collection: (name: string) => {
       if (name !== 'rooms') throw new Error(`Unexpected collection: ${name}`);
       return {
-        doc: () => ({
-          get: options.roomError
-            ? vi.fn().mockRejectedValue(options.roomError)
-            : vi.fn().mockResolvedValue({ ...room, get: (field: string) => room.data?.()?.[field] }),
-          collection: (sub: string) => {
-            if (sub === 'members') {
-              return {
-                doc: () => ({
-                  get: options.memberError
-                    ? vi.fn().mockRejectedValue(options.memberError)
-                    : vi.fn().mockResolvedValue(options.member ?? { exists: true }),
-                }),
-              };
-            }
-            if (sub === 'messages') {
-              return {
-                doc: () => ({ id: 'msg-123', create }),
-              };
-            }
-            throw new Error(`Unexpected subcollection: ${sub}`);
-          },
-        }),
+        doc: () => roomRef,
       };
     },
   };
   mocks.getFirestoreDb.mockReturnValue(db);
-  return { db, create };
+  return { db, create, update, set, del, roomRef };
 }
 
 beforeEach(() => vi.resetAllMocks());
@@ -86,8 +102,8 @@ it('maps Firestore read errors to AUTHORIZATION_UNAVAILABLE', async () => {
   await expect(ensureRoomAccessible('room-1', 'user-1')).rejects.toMatchObject({ code: 'AUTHORIZATION_UNAVAILABLE' });
 });
 
-it('persists message in rooms/{roomId}/messages with Firestore schema', async () => {
-  const { create } = makeDb();
+it('persists message in rooms/{roomId}/messages and updates room lastActivityAt', async () => {
+  const { create, update, roomRef } = makeDb();
   const saved = await persistRoomMessage('room-1', 'user-1', 'Hola equipo');
   expect(saved.messageId).toBe('msg-123');
   expect(saved.authorId).toBe('user-1');
@@ -100,6 +116,25 @@ it('persists message in rooms/{roomId}/messages with Firestore schema', async ()
     text: 'Hola equipo',
     createdAt: expect.any(Timestamp),
   }));
+  expect(update).toHaveBeenCalledWith(roomRef, { lastActivityAt: expect.any(Timestamp) });
+});
+
+it('syncs active presence and updates lastActivityAt only while the room exists', async () => {
+  const { set, del, update, roomRef } = makeDb();
+  await syncRoomPresence('room-1', 'user-1', true);
+  expect(set).toHaveBeenCalledWith(
+    expect.objectContaining({ id: 'user-1' }),
+    expect.objectContaining({ uid: 'user-1', roomId: 'room-1', updatedAt: expect.any(Timestamp) }),
+  );
+  expect(update).toHaveBeenCalledWith(roomRef, { lastActivityAt: expect.any(Timestamp) });
+
+  await syncRoomPresence('room-1', 'user-1', false);
+  expect(del).toHaveBeenCalledTimes(1);
+
+  const missing = makeDb({ room: { exists: false } });
+  await syncRoomPresence('room-1', 'user-1', true);
+  expect(missing.set).not.toHaveBeenCalled();
+  expect(missing.update).not.toHaveBeenCalled();
 });
 
 it('does not persist a message if the room has already been deleted', async () => {

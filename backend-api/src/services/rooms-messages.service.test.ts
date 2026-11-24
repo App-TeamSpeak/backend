@@ -6,16 +6,17 @@ import { createRoom, deleteRoom, getRoom, joinRoom, listRooms, updateRoom } from
 
 type Stored = Record<string, unknown>;
 
-function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: Stored[]; users?: Stored[]; deletingUid?: string } = {}) {
+function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: Stored[]; presence?: Stored[]; users?: Stored[]; deletingUid?: string } = {}) {
   const rooms = new Map((initial.rooms ?? []).map(value => [String(value.roomId), value]));
   const members = new Map((initial.members ?? []).map(value => [`${value.roomId}/${value.uid}`, value]));
   const messages = new Map((initial.messages ?? []).map(value => [String(value.messageId), value]));
+  const presence = new Map((initial.presence ?? []).map(value => [`${value.roomId}/${value.uid}`, value]));
   const users = new Map((initial.users ?? []).map(value => [String(value.uid), value]));
   let generated = 0;
-  const ref = (kind: 'rooms' | 'members' | 'messages', id?: string, roomId?: string): any => {
+  const ref = (kind: 'rooms' | 'members' | 'messages' | 'presence', id?: string, roomId?: string): any => {
     const key = id ?? `${kind}-${++generated}`;
-    const map = kind === 'rooms' ? rooms : kind === 'members' ? members : messages;
-    const mapKey = kind === 'members' ? `${roomId}/${key}` : key;
+    const map = kind === 'rooms' ? rooms : kind === 'members' ? members : kind === 'presence' ? presence : messages;
+    const mapKey = kind === 'members' || kind === 'presence' ? `${roomId}/${key}` : key;
     return {
       id: key,
       get: vi.fn(async () => ({ exists: map.has(mapKey), data: () => map.get(mapKey) })),
@@ -23,10 +24,10 @@ function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: St
       set: vi.fn(async (value: Stored, options?: { merge?: boolean }) => { map.set(mapKey, options?.merge ? { ...map.get(mapKey), ...value } : value); }),
       update: vi.fn(async (value: Stored) => { map.set(mapKey, { ...map.get(mapKey), ...value }); }),
       delete: vi.fn(async () => { map.delete(mapKey); }),
-      collection: vi.fn((name: string) => collection(name === 'members' ? 'members' : 'messages', key)),
+      collection: vi.fn((name: string) => collection(name === 'members' ? 'members' : name === 'presence' ? 'presence' : 'messages', key)),
     };
   };
-  const collection = (kind: 'rooms' | 'members' | 'messages' | 'accountDeletions' | 'users', roomId?: string): any => ({
+  const collection = (kind: 'rooms' | 'members' | 'messages' | 'presence' | 'accountDeletions' | 'users', roomId?: string): any => ({
     doc: vi.fn((id?: string) => kind === 'accountDeletions'
       ? { id, get: vi.fn(async () => ({ exists: id === initial.deletingUid, data: () => ({ status: 'pending' }) })) }
       : kind === 'users'
@@ -37,8 +38,14 @@ function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: St
       orderBy: vi.fn(() => messageQuery(roomId)),
     })),
     get: vi.fn(async () => {
-      const values = kind === 'rooms' ? [...rooms.values()] : kind === 'members' ? [...members.entries()].filter(([key]) => key.startsWith(`${roomId}/`)).map(([, value]) => value) : [...messages.values()].filter(message => message.roomId === roomId);
-      return { docs: values.map(data => ({ ref: ref(kind === 'accountDeletions' || kind === 'users' ? 'rooms' : kind, String(data.messageId ?? data.uid ?? data.roomId), roomId), data: () => data })), size: kind === 'rooms' ? rooms.size : kind === 'members' ? [...members.keys()].filter(key => key.startsWith(`${roomId}/`)).length : messages.size };
+      const values = kind === 'rooms'
+        ? [...rooms.values()]
+        : kind === 'members'
+          ? [...members.entries()].filter(([key]) => key.startsWith(`${roomId}/`)).map(([, value]) => value)
+          : kind === 'presence'
+            ? [...presence.entries()].filter(([key]) => key.startsWith(`${roomId}/`)).map(([, value]) => value)
+            : [...messages.values()].filter(message => message.roomId === roomId);
+      return { docs: values.map(data => ({ ref: ref(kind === 'accountDeletions' || kind === 'users' ? 'rooms' : kind, String(data.messageId ?? data.uid ?? data.roomId), roomId), data: () => data })), size: values.length };
     }),
   });
   const messageQuery = (roomId?: string, cursor?: { timestamp: Timestamp; id: string }, limit = 50) => {
@@ -58,7 +65,7 @@ function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: St
     };
   };
   const db = {
-    collection: vi.fn((name: string) => collection(name === 'rooms' ? 'rooms' : name === 'members' ? 'members' : name === 'accountDeletions' ? 'accountDeletions' : name === 'users' ? 'users' : 'messages')),
+    collection: vi.fn((name: string) => collection(name === 'rooms' ? 'rooms' : name === 'members' ? 'members' : name === 'presence' ? 'presence' : name === 'accountDeletions' ? 'accountDeletions' : name === 'users' ? 'users' : 'messages')),
     getAll: vi.fn(async (...refs: any[]) => Promise.all(refs.map(item => item.get()))),
     runTransaction: vi.fn(async (callback: (transaction: any) => unknown) => callback({
       get: vi.fn(async (value: any) => value.get()),
@@ -68,7 +75,7 @@ function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: St
       set: vi.fn(async (value: any, data: Stored, opts?: { merge?: boolean }) => value.set(data, opts)),
     })),
   } as unknown as Firestore;
-  return { db, rooms, members, messages };
+  return { db, rooms, members, messages, presence };
 }
 
 const room = { roomId: 'room-1', ownerId: 'owner', name: 'Sala', createdAt: Timestamp.fromMillis(1) };
@@ -76,12 +83,67 @@ const room = { roomId: 'room-1', ownerId: 'owner', name: 'Sala', createdAt: Time
 describe('rooms and messages services', () => {
   beforeEach(() => vi.restoreAllMocks());
 
-  it('creates a room with its owner as host and returns participant count', async () => {
+  it('creates a room with its owner as host and returns participant count and initial activity', async () => {
     const fake = database();
     const result = await createRoom('owner', 'Sala', fake.db);
-    expect(result).toMatchObject({ name: 'Sala', participants: 1, connected: 1 });
+    expect(result).toMatchObject({ name: 'Sala', participants: 1, connected: 0, lastActivityAt: result.createdAt });
     expect([...fake.rooms.values()]).toHaveLength(1);
     expect([...fake.members.values()][0]).toMatchObject({ uid: 'owner', role: 'host' });
+  });
+
+  it('counts active presence documents separately from total members and cleans presence on delete', async () => {
+    const fake = database({
+      rooms: [room],
+      members: [
+        { roomId: 'room-1', uid: 'owner', role: 'host' },
+        { roomId: 'room-1', uid: 'member-1', role: 'member' },
+        { roomId: 'room-1', uid: 'member-2', role: 'member' },
+      ],
+      presence: [
+        { roomId: 'room-1', uid: 'owner' },
+        { roomId: 'room-1', uid: 'member-1' },
+      ],
+    });
+
+    await expect(getRoom('owner', 'room-1', fake.db)).resolves.toMatchObject({
+      participants: 3,
+      connected: 2,
+      lastActivityAt: room.createdAt.toDate().toISOString(),
+    });
+    await expect(listRooms('owner', fake.db)).resolves.toEqual([
+      expect.objectContaining({ roomId: 'room-1', participants: 3, connected: 2 }),
+    ]);
+
+    await deleteRoom('owner', 'room-1', fake.db);
+    expect(fake.presence.size).toBe(0);
+  });
+
+  it('updates lastActivityAt on rename, new member join, and message creation while keeping createdAt unchanged', async () => {
+    const legacyCreatedAt = Timestamp.fromMillis(1_000);
+    const fake = database({
+      rooms: [{ roomId: 'room-1', ownerId: 'owner', name: 'Sala', createdAt: legacyCreatedAt }],
+      members: [{ roomId: 'room-1', uid: 'owner', role: 'host' }],
+    });
+
+    const spy = vi.spyOn(Timestamp, 'now');
+    spy.mockReturnValueOnce(Timestamp.fromMillis(2_000));
+    const joined = await joinRoom('guest', 'room-1', fake.db);
+    expect(joined.createdAt).toBe(legacyCreatedAt.toDate().toISOString());
+    expect(joined.lastActivityAt).toBe(Timestamp.fromMillis(2_000).toDate().toISOString());
+
+    // Idempotent re-join does not rewrite room activity.
+    const rejoined = await joinRoom('guest', 'room-1', fake.db);
+    expect(rejoined.lastActivityAt).toBe(Timestamp.fromMillis(2_000).toDate().toISOString());
+
+    spy.mockReturnValueOnce(Timestamp.fromMillis(3_000));
+    const renamed = await updateRoom('owner', 'room-1', 'Sala editada', fake.db);
+    expect(renamed.lastActivityAt).toBe(Timestamp.fromMillis(3_000).toDate().toISOString());
+
+    spy.mockReturnValueOnce(Timestamp.fromMillis(4_000));
+    await createMessage('guest', 'room-1', 'Hola equipo', fake.db);
+    const afterMsg = await getRoom('owner', 'room-1', fake.db);
+    expect(afterMsg.lastActivityAt).toBe(Timestamp.fromMillis(4_000).toDate().toISOString());
+    expect(afterMsg.createdAt).toBe(legacyCreatedAt.toDate().toISOString());
   });
 
   it('authorizes members and rejects unrelated users', async () => {

@@ -4,6 +4,7 @@ import {
   getFirestoreCollections,
   getRoomMembersCollection,
   getRoomMessagesCollection,
+  getRoomPresenceCollection,
   getSprint0DemoDocument,
 } from './firestore.service';
 
@@ -42,15 +43,20 @@ describe('Firestore service', () => {
   it('exposes typed room subcollections', () => {
     const members = { collection: vi.fn() };
     const messages = { collection: vi.fn() };
-    const roomDoc = { collection: vi.fn((name: string) => name === 'members' ? members : messages) };
+    const presence = { collection: vi.fn() };
+    const roomDoc = {
+      collection: vi.fn((name: string) => name === 'members' ? members : name === 'presence' ? presence : messages),
+    };
     const rooms = { doc: vi.fn(() => roomDoc) };
     const firestore = { collection: vi.fn(() => rooms) };
 
     expect(getRoomMembersCollection('room-1', firestore as never)).toBe(members);
     expect(getRoomMessagesCollection('room-1', firestore as never)).toBe(messages);
+    expect(getRoomPresenceCollection('room-1', firestore as never)).toBe(presence);
     expect(rooms.doc).toHaveBeenCalledWith('room-1');
     expect(roomDoc.collection).toHaveBeenCalledWith('members');
     expect(roomDoc.collection).toHaveBeenCalledWith('messages');
+    expect(roomDoc.collection).toHaveBeenCalledWith('presence');
   });
 
   it('checks Firestore without reading document contents', async () => {

@@ -95,14 +95,15 @@ export const openapi = {
       },
       Room: {
         type: 'object',
-        required: ['roomId', 'name', 'ownerId', 'createdAt', 'participants', 'connected'],
+        required: ['roomId', 'name', 'ownerId', 'createdAt', 'lastActivityAt', 'participants', 'connected'],
         properties: {
           roomId: { type: 'string', example: 'room_01HXYZ' },
           name: { type: 'string', minLength: 1, maxLength: 80, example: 'Algoritmos' },
           ownerId: { type: 'string', example: 'firebase-user-id' },
           createdAt: { type: 'string', format: 'date-time' },
+          lastActivityAt: { type: 'string', format: 'date-time', description: 'Marca temporal de la última actividad registrada en la sala.' },
           participants: { type: 'integer', minimum: 0 },
-          connected: { type: 'integer', minimum: 0, description: 'Conteo de membresías mantenido por compatibilidad.' },
+          connected: { type: 'integer', minimum: 0, description: 'Cantidad de usuarios conectados en tiempo real en la sala.' },
         },
       },
       Message: {

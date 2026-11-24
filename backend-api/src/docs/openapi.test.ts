@@ -85,4 +85,11 @@ describe('OpenAPI user contracts', () => {
     expect(openapi.paths['/api/users/me/deletion-status'].get).toBeDefined();
   });
 
+  it('documents Room with lastActivityAt and real-time connected count', () => {
+    const schema = openapi.components.schemas.Room;
+    expect(schema.required).toEqual(expect.arrayContaining(['roomId', 'name', 'ownerId', 'createdAt', 'lastActivityAt', 'participants', 'connected']));
+    expect(schema.properties.lastActivityAt).toMatchObject({ type: 'string', format: 'date-time' });
+    expect(schema.properties.connected.description).toContain('tiempo real');
+  });
+
 });

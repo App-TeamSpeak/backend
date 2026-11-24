@@ -84,15 +84,19 @@ export async function listMessages(
 }
 export async function createMessage(uid: string, roomId: string, text: string, db?: Firestore) {
   return withFirestore(async firestore => {
-    const { accountDeletions } = getFirestoreCollections(firestore);
+    const { accountDeletions, rooms } = getFirestoreCollections(firestore);
+    const roomRef = rooms.doc(roomId);
     const memberRef = getRoomMembersCollection(roomId, firestore).doc(uid);
     const ref = getRoomMessagesCollection(roomId, firestore).doc();
     const message: MessageDocument = { messageId: ref.id, roomId, senderId: uid, text, createdAt: Timestamp.now() };
     await firestore.runTransaction(async transaction => {
       assertNoAccountDeletion(await transaction.get(accountDeletions.doc(uid)));
+      const room = await transaction.get(roomRef);
+      if (!room.exists) throw new AppError(404, 'ROOM_NOT_FOUND', 'La sala no existe.');
       const member = await transaction.get(memberRef);
       if (!member.exists) throw new AppError(403, 'ROOM_ACCESS_DENIED', 'Debes unirte a la sala antes de enviar mensajes.');
       transaction.create(ref, message);
+      transaction.update(roomRef, { lastActivityAt: message.createdAt });
     });
     return serialize(message);
   }, db);

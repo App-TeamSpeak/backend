@@ -1,7 +1,7 @@
 import { FieldPath, type CollectionReference, type Firestore } from 'firebase-admin/firestore';
 import { AppError } from '../middleware/errors';
 import { getFirestoreDb } from '../config/firebase';
-import type { AccountDeletionDocument, MemberDocument, MessageDocument, RoomDocument, UserDocument, UsernameDocument } from './firestore.documents';
+import type { AccountDeletionDocument, MemberDocument, MessageDocument, RoomDocument, RoomPresenceDocument, UserDocument, UsernameDocument } from './firestore.documents';
 
 export function getFirestoreCollections(firestore: Firestore = getFirestoreDb()) {
   return {
@@ -18,6 +18,10 @@ export function getRoomMembersCollection(roomId: string, firestore: Firestore = 
 
 export function getRoomMessagesCollection(roomId: string, firestore: Firestore = getFirestoreDb()) {
   return firestore.collection('rooms').doc(roomId).collection('messages') as CollectionReference<MessageDocument>;
+}
+
+export function getRoomPresenceCollection(roomId: string, firestore: Firestore = getFirestoreDb()) {
+  return firestore.collection('rooms').doc(roomId).collection('presence') as CollectionReference<RoomPresenceDocument>;
 }
 
 export async function checkFirestoreConnection(firestore: Firestore = getFirestoreDb()): Promise<void> {

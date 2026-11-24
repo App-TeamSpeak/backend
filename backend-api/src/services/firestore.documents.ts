@@ -23,6 +23,13 @@ export interface RoomDocument {
   ownerId: string;
   name: string;
   createdAt: Timestamp;
+  lastActivityAt?: Timestamp;
+}
+
+export interface RoomPresenceDocument {
+  uid: string;
+  roomId: string;
+  updatedAt: Timestamp;
 }
 
 export interface MemberDocument {
