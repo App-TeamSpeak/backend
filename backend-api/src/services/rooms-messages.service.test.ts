@@ -6,10 +6,11 @@ import { createRoom, deleteRoom, getRoom, joinRoom, listRooms, updateRoom } from
 
 type Stored = Record<string, unknown>;
 
-function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: Stored[]; deletingUid?: string } = {}) {
+function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: Stored[]; users?: Stored[]; deletingUid?: string } = {}) {
   const rooms = new Map((initial.rooms ?? []).map(value => [String(value.roomId), value]));
   const members = new Map((initial.members ?? []).map(value => [`${value.roomId}/${value.uid}`, value]));
   const messages = new Map((initial.messages ?? []).map(value => [String(value.messageId), value]));
+  const users = new Map((initial.users ?? []).map(value => [String(value.uid), value]));
   let generated = 0;
   const ref = (kind: 'rooms' | 'members' | 'messages', id?: string, roomId?: string): any => {
     const key = id ?? `${kind}-${++generated}`;
@@ -25,15 +26,19 @@ function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: St
       collection: vi.fn((name: string) => collection(name === 'members' ? 'members' : 'messages', key)),
     };
   };
-  const collection = (kind: 'rooms' | 'members' | 'messages' | 'accountDeletions', roomId?: string): any => ({
-    doc: vi.fn((id?: string) => kind === 'accountDeletions' ? { id, get: vi.fn(async () => ({ exists: id === initial.deletingUid, data: () => ({ status: 'pending' }) })) } : ref(kind, id, roomId)),
+  const collection = (kind: 'rooms' | 'members' | 'messages' | 'accountDeletions' | 'users', roomId?: string): any => ({
+    doc: vi.fn((id?: string) => kind === 'accountDeletions'
+      ? { id, get: vi.fn(async () => ({ exists: id === initial.deletingUid, data: () => ({ status: 'pending' }) })) }
+      : kind === 'users'
+        ? { id, get: vi.fn(async () => ({ exists: id !== undefined && users.has(id), data: () => (id !== undefined ? users.get(id) : undefined) })) }
+        : ref(kind, id, roomId)),
     where: vi.fn((_field: string, _operator: string, value: unknown) => ({ get: vi.fn(async () => ({ docs: [...rooms.values()].filter(room => room.ownerId === value).map(data => ({ data: () => data })) })) })),
     orderBy: vi.fn(() => ({
       orderBy: vi.fn(() => messageQuery(roomId)),
     })),
     get: vi.fn(async () => {
       const values = kind === 'rooms' ? [...rooms.values()] : kind === 'members' ? [...members.entries()].filter(([key]) => key.startsWith(`${roomId}/`)).map(([, value]) => value) : [...messages.values()].filter(message => message.roomId === roomId);
-      return { docs: values.map(data => ({ ref: ref(kind === 'accountDeletions' ? 'rooms' : kind, String(data.messageId ?? data.uid ?? data.roomId), roomId), data: () => data })), size: kind === 'rooms' ? rooms.size : kind === 'members' ? [...members.keys()].filter(key => key.startsWith(`${roomId}/`)).length : messages.size };
+      return { docs: values.map(data => ({ ref: ref(kind === 'accountDeletions' || kind === 'users' ? 'rooms' : kind, String(data.messageId ?? data.uid ?? data.roomId), roomId), data: () => data })), size: kind === 'rooms' ? rooms.size : kind === 'members' ? [...members.keys()].filter(key => key.startsWith(`${roomId}/`)).length : messages.size };
     }),
   });
   const messageQuery = (roomId?: string, cursor?: { timestamp: Timestamp; id: string }, limit = 50) => {
@@ -53,7 +58,8 @@ function database(initial: { rooms?: Stored[]; members?: Stored[]; messages?: St
     };
   };
   const db = {
-    collection: vi.fn((name: string) => collection(name === 'rooms' ? 'rooms' : name === 'members' ? 'members' : name === 'accountDeletions' ? 'accountDeletions' : 'messages')),
+    collection: vi.fn((name: string) => collection(name === 'rooms' ? 'rooms' : name === 'members' ? 'members' : name === 'accountDeletions' ? 'accountDeletions' : name === 'users' ? 'users' : 'messages')),
+    getAll: vi.fn(async (...refs: any[]) => Promise.all(refs.map(item => item.get()))),
     runTransaction: vi.fn(async (callback: (transaction: any) => unknown) => callback({
       get: vi.fn(async (value: any) => value.get()),
       update: vi.fn((value: any, data: Stored) => value.update(data)),
@@ -196,6 +202,39 @@ describe('rooms and messages services', () => {
     { cursor: Buffer.from(JSON.stringify([1, 1e9, 'id'])).toString('base64url') },
   ])('rejects invalid history query %j', query => {
     expect(messageHistoryQuerySchema.safeParse(query).success).toBe(false);
+  });
+
+  it('resolves unique authorName per page without exposing private fields or deleted users', async () => {
+    const fake = database({
+      rooms: [room],
+      users: [
+        { uid: 'owner', nombre: 'Ana', apellido: 'Pérez', email: 'ana@test.edu', username: 'ana_perez' },
+        { uid: 'member', nombre: 'Luis', apellido: 'Gómez', email: 'luis@test.edu', username: 'luis_gomez' },
+        { uid: 'deleting', nombre: 'Carlos', apellido: 'Ruiz', email: 'carlos@test.edu', username: 'carlos_ruiz' },
+      ],
+      deletingUid: 'deleting',
+      messages: [
+        { messageId: 'm1', roomId: room.roomId, senderId: 'owner', text: 'Uno', createdAt: new Timestamp(1, 0) },
+        { messageId: 'm2', roomId: room.roomId, senderId: 'owner', text: 'Dos', createdAt: new Timestamp(2, 0) },
+        { messageId: 'm3', roomId: room.roomId, senderId: 'member', text: 'Tres', createdAt: new Timestamp(3, 0) },
+        { messageId: 'm4', roomId: room.roomId, senderId: null, authorDeleted: true, text: 'Anónimo', createdAt: new Timestamp(4, 0) },
+        { messageId: 'm5', roomId: room.roomId, senderId: 'deleting', text: 'En eliminación', createdAt: new Timestamp(5, 0) },
+      ],
+    });
+
+    const result = await listMessages('owner', room.roomId, fake.db);
+    expect(result.data).toEqual([
+      expect.objectContaining({ messageId: 'm1', senderId: 'owner', authorName: 'Ana Pérez' }),
+      expect.objectContaining({ messageId: 'm2', senderId: 'owner', authorName: 'Ana Pérez' }),
+      expect.objectContaining({ messageId: 'm3', senderId: 'member', authorName: 'Luis Gómez' }),
+      expect.objectContaining({ messageId: 'm4', senderId: null, authorDeleted: true, authorName: null }),
+      expect.objectContaining({ messageId: 'm5', senderId: 'deleting', authorName: null }),
+    ]);
+    for (const item of result.data) {
+      expect(item).not.toHaveProperty('email');
+      expect(item).not.toHaveProperty('username');
+    }
+    expect((fake.db as unknown as { getAll: ReturnType<typeof vi.fn> }).getAll).toHaveBeenCalledOnce();
   });
 
 });

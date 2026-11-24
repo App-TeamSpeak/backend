@@ -319,11 +319,11 @@ it('tracks one participant across two connections and announces the last departu
   const second = await connected('guest');
   await observer.request('room:join', { roomId: 'presence' });
   await first.request('room:join', { roomId: '  presence  ' });
-  expect(await observer.wait('room:participant-joined')).toEqual({ userId: 'guest' });
+  expect(await observer.wait('room:participant-joined')).toMatchObject({ userId: 'guest' });
   expect(mocks.ensureRoomAccessible).toHaveBeenCalledWith('presence', 'guest');
 
   await second.request('room:join', { roomId: 'presence' });
-  expect(await second.wait('room:joined')).toEqual({ roomId: 'presence', participants: ['observer', 'guest'] });
+  expect(await second.wait('room:joined')).toMatchObject({ roomId: 'presence', participants: ['observer', 'guest'] });
   await first.request('room:leave', {});
   // An acknowledgement to the observer flushes earlier events on its connection.
   await observer.request('room:join', { roomId: 'presence' });
@@ -332,6 +332,30 @@ it('tracks one participant across two connections and announces the last departu
 
   await second.close();
   expect(await observer.wait('room:participant-left')).toEqual({ userId: 'guest' });
+});
+
+it('includes authorName in room:participant-joined and participantNames in room:joined without extra reads', async () => {
+  mocks.requireCompleteProfile
+    .mockResolvedValueOnce({ nombre: 'Ana', apellido: 'Pérez', authorName: 'Ana Pérez' })
+    .mockResolvedValueOnce({ nombre: 'Luis', apellido: 'Gómez', authorName: 'Luis Gómez' });
+  const observer = await connected('observer');
+  const guest = await connected('guest');
+
+  await observer.request('room:join', { roomId: 'room-names' });
+  await guest.request('room:join', { roomId: 'room-names' });
+
+  expect(await observer.wait('room:participant-joined')).toEqual({
+    userId: 'guest',
+    authorName: 'Luis Gómez',
+  });
+  expect(await guest.wait('room:joined')).toEqual({
+    roomId: 'room-names',
+    participants: ['observer', 'guest'],
+    participantNames: {
+      observer: 'Ana Pérez',
+      guest: 'Luis Gómez',
+    },
+  });
 });
 
 it.each(['ROOM_NOT_FOUND', 'ROOM_ACCESS_DENIED'] as const)('rejects room:join with %s without joining or leaving current room', async (code) => {
@@ -344,6 +368,7 @@ it.each(['ROOM_NOT_FOUND', 'ROOM_ACCESS_DENIED'] as const)('rejects room:join wi
 });
 
 it('delivers chat only to the active room using the authenticated author', async () => {
+  mocks.requireCompleteProfile.mockResolvedValueOnce({ nombre: 'Ana', apellido: 'Pérez', authorName: 'Ana Pérez' });
   const sender = await connected('sender');
   const peer = await connected('peer');
   const outsider = await connected('outsider');
@@ -354,7 +379,9 @@ it('delivers chat only to the active room using the authenticated author', async
   const payload = { text: '  Hola sala  ', uid: 'forged', roomId: 'room-2' };
   expect(await sender.request('chat:send', payload)).toEqual({ ok: true });
   const delivered = await peer.wait('chat:message');
-  expect(delivered).toMatchObject({ authorId: 'sender', text: 'Hola sala' });
+  expect(delivered).toMatchObject({ authorId: 'sender', authorName: 'Ana Pérez', text: 'Hola sala' });
+  expect(delivered).not.toHaveProperty('email');
+  expect(delivered).not.toHaveProperty('username');
   expect(await sender.wait('chat:message')).toEqual(delivered);
   expect(mocks.persistRoomMessage).toHaveBeenCalledExactlyOnceWith('room-1', 'sender', 'Hola sala');
 

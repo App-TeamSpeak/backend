@@ -6,7 +6,45 @@ import { requireRoom } from './rooms.service';
 import type { MessageHistoryQuery } from '../validators/message.validator';
 import type { MessageDocument } from './firestore.documents';
 
-function serialize(message: MessageDocument) { return { ...message, createdAt: message.createdAt.toDate().toISOString() }; }
+function formatFullName(data: Record<string, unknown> | undefined): string | null {
+  if (!data) return null;
+  const nombre = typeof data.nombre === 'string' ? data.nombre.trim() : '';
+  const apellido = typeof data.apellido === 'string' ? data.apellido.trim() : '';
+  const fullName = `${nombre} ${apellido}`.trim();
+  return fullName || null;
+}
+
+async function resolveAuthorNames(messages: MessageDocument[], firestore: Firestore): Promise<Map<string, string | null>> {
+  const uids = [...new Set(
+    messages
+      .filter(message => !message.authorDeleted && typeof message.senderId === 'string' && message.senderId.length > 0)
+      .map(message => message.senderId as string),
+  )];
+  const resolved = new Map<string, string | null>();
+  if (uids.length === 0) return resolved;
+
+  const { users, accountDeletions } = getFirestoreCollections(firestore);
+  const userRefs = uids.map(uid => users.doc(uid));
+  const deletionRefs = uids.map(uid => accountDeletions.doc(uid));
+  const snapshots = typeof firestore.getAll === 'function'
+    ? await firestore.getAll(...userRefs, ...deletionRefs)
+    : await Promise.all([...userRefs, ...deletionRefs].map(ref => ref.get()));
+
+  for (let index = 0; index < uids.length; index += 1) {
+    const userSnap = snapshots[index];
+    const deletionSnap = snapshots[uids.length + index];
+    if (deletionSnap?.exists || !userSnap?.exists) {
+      resolved.set(uids[index], null);
+      continue;
+    }
+    resolved.set(uids[index], formatFullName(userSnap.data() as Record<string, unknown> | undefined));
+  }
+  return resolved;
+}
+
+function serialize(message: MessageDocument, authorName: string | null = null) {
+  return { ...message, authorName, createdAt: message.createdAt.toDate().toISOString() };
+}
 export async function listMessages(
   uid: string,
   roomId: string,
@@ -32,8 +70,14 @@ export async function listMessages(
       nextCursor = Buffer.from(JSON.stringify([seconds, nanoseconds, oldest.id])).toString('base64url');
     }
 
+    const chronological = page.reverse().map(doc => doc.data());
+    const authorNames = await resolveAuthorNames(chronological, firestore);
+
     return {
-      data: page.reverse().map(doc => serialize(doc.data())),
+      data: chronological.map(message => serialize(
+        message,
+        message.authorDeleted || !message.senderId ? null : (authorNames.get(message.senderId) ?? null),
+      )),
       pagination: { nextCursor },
     };
   }, db);

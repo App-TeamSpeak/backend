@@ -18,8 +18,7 @@ services:
         - node
         - -e
         - >-
-          fetch('http://127.0.0.1:10000/health').then((response) =>
-          process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))
+          fetch('http://127.0.0.1:10000/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))
       interval: 10s
       timeout: 5s
       retries: 5
@@ -43,8 +42,7 @@ services:
         - node
         - -e
         - >-
-          fetch('http://127.0.0.1:10000/health').then((response) =>
-          process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))
+          fetch('http://127.0.0.1:10000/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))
       interval: 10s
       timeout: 5s
       retries: 5

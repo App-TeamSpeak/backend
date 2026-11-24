@@ -19,7 +19,9 @@ export type ProfileAuthorizationCode = 'PROFILE_INCOMPLETE' | 'PROFILE_INCONSIST
 export class ProfileAuthorizationError extends Error {
   constructor(public readonly code: ProfileAuthorizationCode) { super(code); this.name = 'ProfileAuthorizationError'; }
 }
-export async function requireCompleteProfile(uid: string): Promise<void> {
+export type VerifiedProfile = { nombre: string; apellido: string; authorName: string };
+
+export async function requireCompleteProfile(uid: string): Promise<VerifiedProfile> {
   let value: unknown;
   try { value = await withAuthorizationTimeout(() => readUserProfile(uid)); }
   catch { throw new ProfileAuthorizationError('AUTHORIZATION_UNAVAILABLE'); }
@@ -31,5 +33,9 @@ export async function requireCompleteProfile(uid: string): Promise<void> {
     || (profile.username && profile.usernameKey && profile.username.toLowerCase() !== profile.usernameKey)) {
     throw new ProfileAuthorizationError('PROFILE_INCONSISTENT');
   }
-  if (!complete.safeParse(value).success) throw new ProfileAuthorizationError('PROFILE_INCOMPLETE');
+  const verified = complete.safeParse(value);
+  if (!verified.success) throw new ProfileAuthorizationError('PROFILE_INCOMPLETE');
+  const nombre = verified.data.nombre.trim();
+  const apellido = verified.data.apellido.trim();
+  return { nombre, apellido, authorName: `${nombre} ${apellido}`.trim() };
 }
