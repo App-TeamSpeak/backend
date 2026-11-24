@@ -1,12 +1,13 @@
 import { ProfileAuthorizationError } from '../services/profile-state.service';
 import { createServer, type Server } from 'node:http';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ verifyToken: vi.fn(), requireActiveAccount: vi.fn(), startAccountAuthorization: vi.fn(), watchAccountDeletion: vi.fn(), requireCompleteProfile: vi.fn(), ensureRoomAccessible: vi.fn(), persistRoomMessage: vi.fn(), watchRoomAccess: vi.fn() }));
+const mocks = vi.hoisted(() => ({ verifyToken: vi.fn(), requireActiveAccount: vi.fn(), startAccountAuthorization: vi.fn(), watchAccountDeletion: vi.fn(), requireCompleteProfile: vi.fn(), ensureRoomAccessible: vi.fn(), persistRoomMessage: vi.fn(), syncRoomPresence: vi.fn(), watchRoomAccess: vi.fn() }));
 vi.mock('../services/profile-state.service', async original => ({ ...await original<typeof import('../services/profile-state.service')>(), requireCompleteProfile: mocks.requireCompleteProfile }));
 vi.mock('../services/room-chat.service', async original => ({
   ...await original<typeof import('../services/room-chat.service')>(),
   ensureRoomAccessible: mocks.ensureRoomAccessible,
   persistRoomMessage: mocks.persistRoomMessage,
+  syncRoomPresence: mocks.syncRoomPresence,
   watchRoomAccess: mocks.watchRoomAccess,
 }));
 vi.mock('../services/firebase-auth.service', () => ({ verifyToken: mocks.verifyToken }));
@@ -28,6 +29,7 @@ beforeEach(async () => {
   mocks.ensureRoomAccessible.mockResolvedValue(undefined);
   mocks.watchRoomAccess.mockImplementation(() => vi.fn());
   mocks.persistRoomMessage.mockImplementation(async (_roomId, uid, text) => ({ messageId: 'msg-1', authorId: uid, text, createdAt: new Date().toISOString() }));
+  mocks.syncRoomPresence.mockResolvedValue(undefined);
   mocks.watchAccountDeletion.mockImplementation((_uid, changed) => { queueMicrotask(() => changed(false)); return vi.fn(); });
   mocks.startAccountAuthorization.mockImplementation((uid) => {
     const authorized = mocks.requireActiveAccount(uid);
@@ -519,4 +521,52 @@ it('detaches room watcher on room:leave and disconnect', async () => {
   await value.request('room:join', { roomId: 'room-1' });
   await value.request('room:leave', {});
   expect(stopWatcher).toHaveBeenCalledTimes(1);
+});
+
+it('syncs Firestore room presence across multi-tab join, leave, disconnect, and serialized races', async () => {
+  const state = new Set<string>();
+  let releaseFirstWrite!: () => void;
+  const firstWritePaused = new Promise<void>((resolve) => {
+    mocks.syncRoomPresence.mockImplementationOnce((roomId: string, uid: string, present: boolean) => {
+      resolve();
+      return new Promise<void>((done) => {
+        releaseFirstWrite = () => {
+          if (present) state.add(`${roomId}/${uid}`);
+          else state.delete(`${roomId}/${uid}`);
+          done();
+        };
+      });
+    });
+  });
+  mocks.syncRoomPresence.mockImplementation(async (roomId: string, uid: string, present: boolean) => {
+    if (present) state.add(`${roomId}/${uid}`);
+    else state.delete(`${roomId}/${uid}`);
+  });
+
+  const tab1 = await connected('user-a');
+  await tab1.request('room:join', { roomId: 'room-sync' });
+  await firstWritePaused;
+  // Close before the first presence write completes; serialized sync must not leave a ghost doc.
+  await tab1.close();
+  releaseFirstWrite();
+  await vi.waitFor(() => {
+    expect(mocks.syncRoomPresence).toHaveBeenLastCalledWith('room-sync', 'user-a', false);
+  });
+  expect(state.has('room-sync/user-a')).toBe(false);
+
+  // Two connections for same user keep presence active until the last leaves.
+  const first = await connected('user-b');
+  const second = await connected('user-b');
+  await first.request('room:join', { roomId: 'room-sync' });
+  await second.request('room:join', { roomId: 'room-sync' });
+  await vi.waitFor(() => expect(state.has('room-sync/user-b')).toBe(true));
+
+  await first.request('room:leave', {});
+  await vi.waitFor(() => {
+    expect(mocks.syncRoomPresence).toHaveBeenCalledWith('room-sync', 'user-b', true);
+  });
+  expect(state.has('room-sync/user-b')).toBe(true);
+
+  await second.close();
+  await vi.waitFor(() => expect(state.has('room-sync/user-b')).toBe(false));
 });

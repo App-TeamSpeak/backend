@@ -6,7 +6,7 @@ import { env } from '../config/env';
 import { FirebaseConfigurationError } from '../config/firebase';
 import { verifyToken } from '../services/firebase-auth.service';
 import { AccountAuthorizationError, requireActiveAccount, startAccountAuthorization, withAuthorizationTimeout } from '../services/account-state.service';
-import { ensureRoomAccessible, persistRoomMessage, RoomChatError, watchRoomAccess } from '../services/room-chat.service';
+import { ensureRoomAccessible, persistRoomMessage, RoomChatError, syncRoomPresence, watchRoomAccess } from '../services/room-chat.service';
 
 const lifecycles = new WeakMap<Server, { stop(): void; drain(): Promise<void> }>();
 export function getRealtimeLifecycle(io: Server) {
@@ -52,6 +52,19 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
   const access = createAccountAccess();
   let stopping = false;
   const pendingReads = new Set<Promise<void>>();
+  const presenceQueues = new Map<string, Promise<void>>();
+  const schedulePresenceSync = (roomId: string, uid: string) => {
+    const key = `${roomId}:${uid}`;
+    const previous = presenceQueues.get(key) ?? Promise.resolve();
+    const task = previous.then(async () => {
+      await syncRoomPresence(roomId, uid, isUserInRoom(io, roomId, uid));
+    }).finally(() => {
+      if (presenceQueues.get(key) === task) presenceQueues.delete(key);
+    });
+    presenceQueues.set(key, task);
+    pendingReads.add(task);
+    void task.then(() => { pendingReads.delete(task); });
+  };
   const roomWatchers = new Set<() => void>();
   const closeRoomWatchers = () => {
     for (const stop of [...roomWatchers]) stop();
@@ -162,6 +175,7 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       void (async () => {
         try { await socket.leave(expectedRoomId); }
         finally {
+          schedulePresenceSync(expectedRoomId, socket.data.user.uid);
           if (socket.connected) {
             socket.emit('room:access-revoked', { roomId: expectedRoomId, code });
             notifyParticipantLeft(socket, expectedRoomId);
@@ -205,7 +219,8 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
         } catch (error) {
           const code = error instanceof RoomChatError ? error.code : 'AUTHORIZATION_UNAVAILABLE';
           if (socket.data.roomId === roomId && (code === 'ROOM_NOT_FOUND' || code === 'ROOM_ACCESS_DENIED')) {
-            await leaveRoom(socket, detachRoomWatcher);
+            const leftRoomId = await leaveRoom(socket, detachRoomWatcher);
+            if (leftRoomId) schedulePresenceSync(leftRoomId, socket.data.user.uid);
             if (socket.connected) socket.emit('room:access-revoked', { roomId, code });
           }
           report(socket, code, ack);
@@ -220,7 +235,8 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
           ack?.({ ok: true });
           return;
         }
-        await leaveRoom(socket, detachRoomWatcher);
+        const previousRoomId = await leaveRoom(socket, detachRoomWatcher);
+        if (previousRoomId) schedulePresenceSync(previousRoomId, socket.data.user.uid);
         if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
         await socket.join(roomId);
         if (!allowed()) { await socket.leave(roomId); report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
@@ -233,6 +249,7 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
           return;
         }
         announceParticipant(socket, roomId);
+        schedulePresenceSync(roomId, socket.data.user.uid);
         ack?.({ ok: true });
       } finally { release(); }
     });
@@ -242,7 +259,12 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       let release!: () => void;
       transitions = new Promise<void>((resolve) => { release = resolve; });
       await previous;
-      try { if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; } await leaveRoom(socket, detachRoomWatcher); ack?.({ ok: true }); }
+      try {
+        if (!allowed()) { report(socket, 'ACCOUNT_UNAVAILABLE', ack); return; }
+        const leftRoomId = await leaveRoom(socket, detachRoomWatcher);
+        if (leftRoomId) schedulePresenceSync(leftRoomId, socket.data.user.uid);
+        ack?.({ ok: true });
+      }
       finally { release(); }
     });
     protect('chat:send', async (payload, allowed, ack, receivedRoomGeneration) => {
@@ -305,7 +327,10 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
       socket.data.roomGeneration = ((socket.data.roomGeneration as number | undefined) ?? 0) + 1;
       delete socket.data.roomId;
       detachRoomWatcher();
-      if (roomId) notifyParticipantLeft(socket, roomId);
+      if (roomId) {
+        notifyParticipantLeft(socket, roomId);
+        schedulePresenceSync(roomId, socket.data.user.uid);
+      }
     });
   });
   return io;
@@ -354,13 +379,24 @@ function notifyParticipantLeft(socket: Socket, roomId: string): void {
   }
 }
 
-async function leaveRoom(socket: Socket, detachWatcher?: () => void): Promise<void> {
+function isUserInRoom(io: Server, roomId: string, uid: string): boolean {
+  for (const id of io.sockets.adapter.rooms.get(roomId) ?? []) {
+    const target = io.sockets.sockets.get(id);
+    if (target?.connected && target.data.roomId === roomId && target.data.user?.uid === uid) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function leaveRoom(socket: Socket, detachWatcher?: () => void): Promise<string | undefined> {
   const roomId = socket.data.roomId as string | undefined;
   socket.data.roomGeneration = ((socket.data.roomGeneration as number | undefined) ?? 0) + 1;
   detachWatcher?.();
-  if (!roomId) return;
+  if (!roomId) return undefined;
   delete socket.data.roomId;
   await socket.leave(roomId);
   // No protected action may resume after a disconnect. Cleanup itself is unconditional.
   if (socket.connected) notifyParticipantLeft(socket, roomId);
+  return roomId;
 }

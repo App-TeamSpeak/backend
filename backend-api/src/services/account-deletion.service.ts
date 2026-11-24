@@ -5,7 +5,7 @@ import { getFirebaseAuth } from '../config/firebase';
 import { assertDeletionTestEnvironment, deletionTestProject } from '../config/deletion-test';
 import { isTransientAuthError } from '../middleware/auth';
 import { AppError } from '../middleware/errors';
-import { getFirestoreCollections, getRoomMembersCollection, getRoomMessagesCollection, withFirestore } from './firestore.service';
+import { getFirestoreCollections, getRoomMembersCollection, getRoomMessagesCollection, getRoomPresenceCollection, withFirestore } from './firestore.service';
 import { parseAccountDeletion, readDeletionResources, assertOwnedReservation, deletionInconsistent } from './account-deletion.data';
 import type { AccountDeletionDocument } from './firestore.documents';
 
@@ -99,13 +99,15 @@ async function cleanupUserRoomResources(
   for (const roomDoc of ownedRooms.docs) {
     await ensureLease?.();
     const roomId = roomDoc.id;
-    const [members, messages] = await Promise.all([
+    const [members, messages, presence] = await Promise.all([
       getRoomMembersCollection(roomId, firestore).get(),
       getRoomMessagesCollection(roomId, firestore).get(),
+      getRoomPresenceCollection(roomId, firestore).get(),
     ]);
     await commitBatchedWrites(firestore, [
       ...members.docs.map((doc) => (batch: ReturnType<Firestore['batch']>) => batch.delete(doc.ref)),
       ...messages.docs.map((doc) => (batch: ReturnType<Firestore['batch']>) => batch.delete(doc.ref)),
+      ...presence.docs.map((doc) => (batch: ReturnType<Firestore['batch']>) => batch.delete(doc.ref)),
       (batch) => batch.delete(roomDoc.ref),
     ], ensureLease);
   }
@@ -117,6 +119,12 @@ async function cleanupUserRoomResources(
   ]);
   await commitBatchedWrites(firestore, [
     ...foreignMemberships.docs.map((doc) => (batch: ReturnType<Firestore['batch']>) => batch.delete(doc.ref)),
+    ...foreignMemberships.docs.map((doc) => (batch: ReturnType<Firestore['batch']>) => {
+      const roomId = doc.data().roomId;
+      if (typeof roomId === 'string' && roomId) {
+        batch.delete(getRoomPresenceCollection(roomId, firestore).doc(uid));
+      }
+    }),
     ...foreignMessages.docs.map((doc) => (batch: ReturnType<Firestore['batch']>) => batch.update(doc.ref as DocumentReference, { senderId: null, authorDeleted: true })),
   ], ensureLease);
 }

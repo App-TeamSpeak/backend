@@ -1,7 +1,7 @@
 import { Timestamp, type Firestore, type DocumentSnapshot } from 'firebase-admin/firestore';
 import { AppError } from '../middleware/errors';
 import { assertNoAccountDeletion } from './account-state.service';
-import { getFirestoreCollections, getRoomMembersCollection, getRoomMessagesCollection, withFirestore } from './firestore.service';
+import { getFirestoreCollections, getRoomMembersCollection, getRoomMessagesCollection, getRoomPresenceCollection, withFirestore } from './firestore.service';
 import type { RoomDocument } from './firestore.documents';
 
 async function memberSnapshot(roomId: string, uid: string, db: Firestore) {
@@ -16,8 +16,18 @@ export async function requireRoom(roomId: string, uid: string, db: Firestore) {
   return data;
 }
 async function serialize(room: RoomDocument, db: Firestore) {
-  const members = await getRoomMembersCollection(room.roomId, db).get();
-  return { ...room, createdAt: room.createdAt.toDate().toISOString(), participants: members.size, connected: members.size };
+  const [members, presence] = await Promise.all([
+    getRoomMembersCollection(room.roomId, db).get(),
+    getRoomPresenceCollection(room.roomId, db).get(),
+  ]);
+  const lastActivityAt = (room.lastActivityAt ?? room.createdAt).toDate().toISOString();
+  return {
+    ...room,
+    createdAt: room.createdAt.toDate().toISOString(),
+    lastActivityAt,
+    participants: members.size,
+    connected: presence.size,
+  };
 }
 
 export async function listRooms(uid: string, db?: Firestore) {
@@ -31,7 +41,8 @@ export async function createRoom(uid: string, name: string, db?: Firestore) {
   return withFirestore(async firestore => {
     const { rooms, accountDeletions } = getFirestoreCollections(firestore);
     const ref = rooms.doc();
-    const room: RoomDocument = { roomId: ref.id, ownerId: uid, name, createdAt: Timestamp.now() };
+    const now = Timestamp.now();
+    const room: RoomDocument = { roomId: ref.id, ownerId: uid, name, createdAt: now, lastActivityAt: now };
     const member = getRoomMembersCollection(ref.id, firestore).doc(uid);
     await firestore.runTransaction(async transaction => {
       assertNoAccountDeletion(await transaction.get(accountDeletions.doc(uid)));
@@ -56,8 +67,9 @@ export async function updateRoom(uid: string, roomId: string, name: string, db?:
     const room = await firestore.runTransaction(async transaction => {
       assertNoAccountDeletion(await transaction.get(accountDeletions.doc(uid)));
       const current = requireOwner(await transaction.get(ref), uid);
-      transaction.update(ref, { name });
-      return { ...current, name };
+      const lastActivityAt = Timestamp.now();
+      transaction.update(ref, { name, lastActivityAt });
+      return { ...current, name, lastActivityAt };
     });
     return serialize(room, firestore);
   }, db);
@@ -72,7 +84,8 @@ export async function deleteRoom(uid: string, roomId: string, db?: Firestore) {
       requireOwner(await transaction.get(ref), uid);
       const members = await transaction.get(getRoomMembersCollection(roomId, firestore));
       const messages = await transaction.get(getRoomMessagesCollection(roomId, firestore));
-      for (const doc of [...members.docs, ...messages.docs]) transaction.delete(doc.ref);
+      const presence = await transaction.get(getRoomPresenceCollection(roomId, firestore));
+      for (const doc of [...members.docs, ...messages.docs, ...presence.docs]) transaction.delete(doc.ref);
       transaction.delete(ref);
     });
     return { roomId };
@@ -95,9 +108,12 @@ export async function joinRoom(uid: string, rawRoomId: string, db?: Firestore) {
       const roomData = room.data() as RoomDocument;
       const member = await transaction.get(memberRef);
       if (!member.exists) {
+        const joinedAt = Timestamp.now();
         transaction.create(memberRef, {
-          uid, roomId, role: roomData.ownerId === uid ? 'host' : 'member', joinedAt: Timestamp.now(),
+          uid, roomId, role: roomData.ownerId === uid ? 'host' : 'member', joinedAt,
         });
+        transaction.update(roomRef, { lastActivityAt: joinedAt });
+        return { ...roomData, lastActivityAt: joinedAt };
       }
       return roomData;
     });

@@ -25,8 +25,10 @@ function database() {
     ['rooms/room-owned', { roomId: 'room-owned', ownerId: uid, name: 'Sala propia' }],
     ['rooms/room-owned/members/user-a', { uid, roomId: 'room-owned', role: 'host' }],
     ['rooms/room-owned/messages/m-own', { messageId: 'm-own', roomId: 'room-owned', senderId: uid, text: 'propio' }],
+    ['rooms/room-owned/presence/user-a', { uid, roomId: 'room-owned' }],
     ['rooms/room-foreign', { roomId: 'room-foreign', ownerId: 'user-b', name: 'Sala ajena' }],
     ['rooms/room-foreign/members/user-a', { uid, roomId: 'room-foreign', role: 'member' }],
+    ['rooms/room-foreign/presence/user-a', { uid, roomId: 'room-foreign' }],
     ['rooms/room-foreign/members/user-b', { uid: 'user-b', roomId: 'room-foreign', role: 'host' }],
     ['rooms/room-foreign/messages/m-1', { messageId: 'm-1', roomId: 'room-foreign', senderId: uid, text: 'mensaje en sala ajena' }],
     ['rooms/room-foreign/messages/m-2', { messageId: 'm-2', roomId: 'room-foreign', senderId: 'user-b', text: 'mensaje de otro' }],
@@ -138,7 +140,9 @@ describe('US-05 recoverable & complete account deletion', () => {
     expect(fake.data.has('rooms/room-owned')).toBe(false);
     expect(fake.data.has('rooms/room-owned/members/user-a')).toBe(false);
     expect(fake.data.has('rooms/room-owned/messages/m-own')).toBe(false);
+    expect(fake.data.has('rooms/room-owned/presence/user-a')).toBe(false);
     expect(fake.data.has('rooms/room-foreign/members/user-a')).toBe(false);
+    expect(fake.data.has('rooms/room-foreign/presence/user-a')).toBe(false);
 
     // Foreign room, other users' data, and anonymized message remain intact.
     expect(fake.data.has('users/user-b')).toBe(true);

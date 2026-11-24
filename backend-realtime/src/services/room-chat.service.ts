@@ -71,6 +71,7 @@ export async function persistRoomMessage(
         text,
         createdAt,
       });
+      transaction.update(roomRef, { lastActivityAt: createdAt });
     });
   } catch (error) {
     if (error instanceof RoomChatError) throw error;
@@ -82,6 +83,30 @@ export async function persistRoomMessage(
     text,
     createdAt: createdAt.toDate().toISOString(),
   };
+}
+
+export async function syncRoomPresence(roomId: string, uid: string, present: boolean): Promise<void> {
+  if (!roomId || roomId.length > 128 || roomId.includes('/') || !uid || uid.length > 128 || uid.includes('/')) {
+    return;
+  }
+  try {
+    const db = getFirestoreDb();
+    const roomRef = db.collection('rooms').doc(roomId);
+    const presenceRef = roomRef.collection('presence').doc(uid);
+    if (!present) {
+      await presenceRef.delete();
+      return;
+    }
+    const updatedAt = Timestamp.now();
+    await db.runTransaction(async transaction => {
+      const room = await transaction.get(roomRef);
+      if (!room.exists) return;
+      transaction.set(presenceRef, { uid, roomId, updatedAt });
+      transaction.update(roomRef, { lastActivityAt: updatedAt });
+    });
+  } catch {
+    // Best-effort presence sync; failures must not disrupt socket signaling or disconnect cleanup.
+  }
 }
 
 export function watchRoomAccess(
