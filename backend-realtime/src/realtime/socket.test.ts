@@ -360,6 +360,23 @@ it('includes authorName in room:participant-joined and participantNames in room:
   });
 });
 
+it('emits room:updated only to the connection watching the renamed room', async () => {
+  const updates = new Map<string, (room: { name: string }) => void>();
+  mocks.watchRoomAccess.mockImplementation((roomId, _uid, _onRevoked, _onError, onUpdated) => {
+    if (onUpdated) updates.set(roomId, onUpdated);
+    return vi.fn();
+  });
+  const member = await connected('member');
+  const outsider = await connected('outsider');
+  await member.request('room:join', { roomId: 'renamed' });
+  await outsider.request('room:join', { roomId: 'other' });
+
+  updates.get('renamed')?.({ name: 'Nombre nuevo' });
+
+  expect(await member.wait('room:updated')).toEqual({ roomId: 'renamed', name: 'Nombre nuevo' });
+  expect(outsider.received.some(([event]) => event === 'room:updated')).toBe(false);
+});
+
 it.each(['ROOM_NOT_FOUND', 'ROOM_ACCESS_DENIED'] as const)('rejects room:join with %s without joining or leaving current room', async (code) => {
   const value = await connected();
   await value.request('room:join', { roomId: 'existing' });
