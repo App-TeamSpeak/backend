@@ -190,6 +190,11 @@ export function createRealtimeServer(httpServer: HttpServer): Server {
         socket.data.user.uid,
         (code) => revokeRoomAccess(roomId, generation, code),
         () => revokeRoomAccess(roomId, generation, 'ROOM_ACCESS_DENIED'),
+        ({ name }) => {
+          if (socket.data.roomId === roomId && socket.data.roomGeneration === generation && socket.connected) {
+            socket.emit('room:updated', { roomId, name });
+          }
+        },
       );
       if (socket.data.roomId === roomId && socket.data.roomGeneration === generation && socket.connected && !stopping) {
         socket.data.roomWatcher = stop;

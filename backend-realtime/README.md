@@ -4,6 +4,8 @@ Gateway Socket.IO para presencia de participantes, chat en tiempo real y señali
 
 ## Eventos
 
+- `room:updated` (`{ roomId, name }`): el servidor lo emite a cada miembro conectado cuando cambia el nombre de la sala observada en Firestore.
+
 | Dirección | Evento | Payload mínimo |
 | --- | --- | --- |
 | cliente → servidor | `room:join` | `{ roomId }` |

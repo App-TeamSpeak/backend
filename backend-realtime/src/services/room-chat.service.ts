@@ -114,6 +114,7 @@ export function watchRoomAccess(
   uid: string,
   onRevoked: (code: 'ROOM_NOT_FOUND' | 'ROOM_ACCESS_DENIED') => void,
   onError: () => void,
+  onUpdated?: (room: { name: string }) => void,
 ): () => void {
   if (!roomId || roomId.length > 128 || roomId.includes('/') || !uid || uid.length > 128 || uid.includes('/')) {
     onRevoked('ROOM_ACCESS_DENIED');
@@ -124,6 +125,7 @@ export function watchRoomAccess(
   let active = true;
   let roomExists: boolean | undefined;
   let ownerId: unknown;
+  let roomName: string | undefined;
   let memberExists: boolean | undefined;
   let stopRoom: (() => void) | undefined;
   let stopMember: (() => void) | undefined;
@@ -163,7 +165,11 @@ export function watchRoomAccess(
     stopRoom = roomRef.onSnapshot((snapshot) => {
       if (!active) return;
       roomExists = snapshot.exists;
-      ownerId = snapshot.exists ? (snapshot.data() as { ownerId?: unknown } | undefined)?.ownerId : undefined;
+      const data = snapshot.exists ? snapshot.data() as { ownerId?: unknown; name?: unknown } | undefined : undefined;
+      ownerId = data?.ownerId;
+      const nextName = typeof data?.name === 'string' ? data.name : undefined;
+      if (roomName !== undefined && nextName !== undefined && nextName !== roomName) onUpdated?.({ name: nextName });
+      roomName = nextName;
       evaluate();
     }, () => {
       if (!active) return;
